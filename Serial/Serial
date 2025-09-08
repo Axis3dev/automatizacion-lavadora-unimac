@@ -1,0 +1,16 @@
+import serial
+import time
+
+# Ajusta COM3 o /dev/ttyUSB0 según tu sistema
+ser = serial.Serial("COM3", 115200, timeout=1)  
+
+time.sleep(2)  # pequeña pausa para que el ESP32 reinicie al abrir puerto
+
+# Mandar texto simple
+ser.write(b"Hola ESP32\n")
+
+# Leer respuesta
+respuesta = ser.readline().decode().strip()
+print("ESP32 dice:", respuesta)
+
+ser.close()

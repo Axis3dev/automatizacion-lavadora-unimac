@@ -1,0 +1,76 @@
+                                        📋 Listado de actividades
+🗂 Organización del proyecto
+
+        ✅ Crear carpetas principales (core, Serial, GUI, ciclos).
+
+        ✅ Entender y documentar la función de cada carpeta.
+
+        ✅ Crear __init__.py en subcarpetas para que sean paquetes.
+
+        ⚙️ Gestión de ciclos (Python)
+
+        ✅ Crear cycle_manager.py con funciones: asegurar_carpeta_ciclos, listar_ciclos, crear_ciclo, eliminar_ciclo.
+
+        ✅ Probar menú en main.py para gestionar ciclos.
+
+        ❌ Definir formato estándar de los archivos .txt de ciclos (estructura paso por paso).
+
+        ❌ Implementar lectura de un ciclo desde archivo y ejecución simulada.
+
+🔌 Comunicación Serial
+
+        ✅ Probar comunicación serial básica (archivo de pruebas).
+
+        ❌ Integrar serial_manager.py con clase SerialManager.
+
+        ❌ Llamar SerialManager desde main.py y enviar un comando de prueba.
+
+        ❌ Crear protocolo de mensajes (ejemplo: START|VALVE1_ON, STOP|MOTOR, etc.).
+
+🖥 Interfaz Gráfica (GUI)
+
+        ❌ Diseñar prototipo de interfaz (Tkinter / PyQt / Kivy).
+
+        ❌ Implementar pantalla principal con menú de selección de ciclos.
+
+        ❌ Botones para iniciar / pausar / detener ciclo.
+
+        ❌ Mostrar estado en tiempo real de la lavadora (valores recibidos del ESP32).
+
+🤖 ESP32 (Firmware)
+
+        ✅ Comunicación serial lista en firmware.
+
+        ❌ Definir comandos que entiende el ESP32.
+
+        ❌ Programar control de actuadores (motores, válvulas, sensores) en firmware.
+
+        ❌ Enviar estados al Python (por ejemplo: "VALVE1_OPENED").
+
+📊 Extra
+
+        ❌ Manejo de errores (desconexión serial, error de archivo, etc.).
+
+        ❌ Documentación mínima (README con instrucciones).
+
+        ❌ Pruebas en la máquina real.
+
+📊 Estado del proyecto
+
+        ✅ Completado: 6 actividades
+
+        ❌ Pendientes: 12 actividades
+
+        📈 Avance: 33 % aprox.
+
+🚀 Recomendaciones para avanzar mejor
+
+        Cerrar el ciclo serial primero → ya que si PC ↔ ESP32 funciona bien, lo demás fluye.
+
+        Definir protocolo de mensajes YA → es la base de la comunicación (ejemplo: comandos con prefijo y separador).
+
+        Estándar de ciclos → decidir cómo se guardan los pasos en .txt (ejemplo: VALVE1,10s, MOTOR,60s).
+
+        Usar Git o al menos respaldos → para no perder cambios conforme iteres.
+
+        Avanzar en bloques: primero “modo consola funcionando”, luego “serial”, luego “GUI”.
