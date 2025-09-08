@@ -1,5 +1,5 @@
 from core.cycle_manager import asegurar_carpeta_ciclos, listar_ciclos, crear_ciclo, eliminar_ciclo
-from nSerial.serial_manager import SerialManager
+from Serial.serial_manager import SerialManager
 
 def main():
     asegurar_carpeta_ciclos()
