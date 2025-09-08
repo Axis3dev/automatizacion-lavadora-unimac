@@ -1,0 +1,17 @@
+# Ciclo de Lavado Completo
+
+[lavado]
+llenado_agua = 2, baja
+dosificar = 2
+lavado = 2, baja
+
+[enjuague]
+num_enjuagues = 2
+llenado_agua = 3, baja
+enjuague = 3, baja
+
+[centrifugado]
+balanceo = 3, baja
+centrifugado = 3, alta
+
+[fin]

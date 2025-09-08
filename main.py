@@ -55,7 +55,7 @@ def main():
             break
 
         else:
-            print("⚠️ Opción no válida.")
+            print("⚠️ Opción no válida. ")
 
 if __name__ == "__main__":
     main()
