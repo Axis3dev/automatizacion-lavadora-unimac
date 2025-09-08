@@ -31,7 +31,7 @@ def main():
                 print("⚠️ No hay ciclos para eliminar.")
                 continue
 
-            print("\nCiclos disponibles para eliminar:")
+            print("\nCiclos disponibles para eliminar :")
             for i, ciclo in enumerate(ciclos, 1):
                 print(f"{i}. {ciclo}")
 
