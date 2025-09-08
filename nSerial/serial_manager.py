@@ -1,5 +1,5 @@
 
-import serial 
+import serial
 import time
 
 class SerialManager:
