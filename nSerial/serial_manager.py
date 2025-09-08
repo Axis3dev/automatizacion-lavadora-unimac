@@ -1,10 +1,11 @@
-import serial
+
+import serial 
 import time
 
 class SerialManager:
     def __init__(self, port="COM3", baudrate=115200, timeout=1):
         try:
-            self.ser = serial.Serial(port, baudrate, timeout=timeout)
+            self.ser = serial.nSerial(port, baudrate, timeout=timeout)
             time.sleep(2)  # esperar a que ESP32 arranque
             print(f"✅ Conectado al puerto {port}")
         except Exception as e:
