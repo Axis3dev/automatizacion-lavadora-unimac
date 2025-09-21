@@ -56,6 +56,5 @@ def main():
 
         else:
             print("⚠️ Opción no válida. ")
-#comentario de verde
 if __name__ == "__main__":
     main()

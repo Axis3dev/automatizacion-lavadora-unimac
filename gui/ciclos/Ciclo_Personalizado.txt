@@ -1,0 +1,5 @@
+nombre=Ciclo Personalizado
+accion=prelavado;duracion=6;agua=fria
+accion=lavado;duracion=6;quimico=A
+accion=enjuague;duracion=3;agua=fria
+accion=centrifugado;duracion=18;velocidad=alto

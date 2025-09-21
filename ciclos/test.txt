@@ -1,17 +1,16 @@
-# Ciclo de Lavado Completo
+[LAVADO]
+LLENADO_S=1
+DOSIFICAR=A:2,B:2,C:2,D:2
+AGITAR_S=2
+VEL=BAJA
 
-[lavado]
-llenado_agua = 12, baja
-dosificar = 12
-lavado = 2, baja
+[ENJUAGUE]
+REPETICIONES=3
+LLENADO_S=1
+AGITAR_S=1
+VEL=BAJA
 
-[enjuague]
-num_enjuagues = 2
-llenado_agua = 3, baja
-enjuague = 1, baja
-
-[centrifugado]
-balanceo = 2, baja
-centrifugado = 2, alta
-
-[fin]
+[CENTRIFUGADO]
+BALANCEO_S=2
+CENTRIFUGADO_S=2
+VEL=BAJA

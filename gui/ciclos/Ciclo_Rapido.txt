@@ -1,0 +1,6 @@
+# Ciclo rápido de ejemplo
+nombre=Ciclo Rápido
+accion=prelavado;duracion=120;agua=fria
+accion=lavado;duracion=600;quimico=A
+accion=enjuague;duracion=300;agua=fria
+accion=centrifugado;duracion=180;velocidad=alto

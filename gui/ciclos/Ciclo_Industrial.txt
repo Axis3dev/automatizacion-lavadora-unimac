@@ -1,0 +1,7 @@
+# Ciclo industrial de ejemplo
+nombre=Ciclo Industrial
+accion=prelavado;duracion=240;agua=fria
+accion=lavado;duracion=900;quimico=B
+accion=enjuague;duracion=300;agua=caliente
+accion=enjuague;duracion=300;agua=fria
+accion=centrifugado;duracion=240;velocidad=alto
