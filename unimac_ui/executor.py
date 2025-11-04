@@ -9,6 +9,14 @@ import time
 from dataclasses import dataclass
 from typing import Callable, Dict, Optional
 
+try:
+    from .serialconn import CFG
+except ImportError:
+    try:
+        from unimac_ui.serialconn import CFG
+    except Exception:  # pragma: no cover
+        CFG = {"globals": {}}
+
 
 @dataclass
 class TickCallbacks:
@@ -43,7 +51,8 @@ class Executor:
                  get_fill_seconds: Optional[Callable[[], Dict[str, int]]] = None,
                  get_chem_seconds: Optional[Callable[[], Dict[str, int]]] = None,
                  get_drain_seconds: Optional[Callable[[], Dict[str, int]]] = None,
-                 get_motor_alt_seconds: Optional[Callable[[], int]] = None):
+                 get_motor_alt_seconds: Optional[Callable[[], int]] = None,
+                 get_motor_pause_seconds: Optional[Callable[[], int]] = None):
         self.hw = hw
         self.cb = TickCallbacks(on_status, on_tick, on_step_change, on_finish)
         self.controller = controller
@@ -52,6 +61,14 @@ class Executor:
         self._get_chem_seconds = get_chem_seconds or (lambda: {"Q1": 4, "Q2": 3, "Q3": 2, "Q4": 2})
         self._get_drain_seconds = get_drain_seconds or (lambda: {"ligero": 20, "estandar": 30, "intenso": 45})
         self._get_motor_alt_seconds = get_motor_alt_seconds or (lambda: 0)
+
+        def _default_pause():
+            try:
+                return CFG.get("globals", {}).get("motor_pause_seconds", 2)
+            except Exception:
+                return 2
+
+        self._get_motor_pause_seconds = get_motor_pause_seconds or _default_pause
 
         self.state = Executor.IDLE
         self.cycle = None
@@ -73,6 +90,11 @@ class Executor:
         self._motor_running = False
         self._motor_interval = 0
         self._motor_timer = 0
+        self._motor_pause_duration = 0
+        self._motor_pause_timer = 0
+        self._motor_pause_active = False
+        self._motor_next_dir = "FWD"
+        self._motor_is_agitation = False
         self.in_drain_pause = False
 
     # ---------- utilidades de configuración ----------
@@ -99,6 +121,14 @@ class Executor:
 
     def _motor_alt_seconds(self) -> int:
         return max(0, self._safe_int(self._get_motor_alt_seconds() or 0, 0))
+
+    def _motor_pause_seconds(self) -> int:
+        getter = getattr(self, "_get_motor_pause_seconds", None)
+        try:
+            value = getter() if getter else 0
+        except Exception:
+            value = 0
+        return max(0, self._safe_int(value, 0))
 
     @staticmethod
     def _normalize_level(level: Optional[str]) -> str:
@@ -305,9 +335,14 @@ class Executor:
         self._agua_temp = getattr(self.cycle, "agua_temp", None)
         self._motor_speed = self._normalize_speed(getattr(step, "velocidad", None))
         self._motor_interval = self._motor_alt_seconds()
+        self._motor_pause_duration = self._motor_pause_seconds()
         self._motor_timer = self._motor_interval
+        self._motor_pause_timer = 0
+        self._motor_pause_active = False
         self._motor_running = False
         self._motor_dir = "FWD"
+        self._motor_next_dir = "REV"
+        self._motor_is_agitation = self._current_action in Executor.WATER_ACTIONS
 
         self.step_remaining = max(1, self._safe_int(getattr(step, "duracion", 0), 1))
         self._mode = Executor._MODE_STEP
@@ -389,6 +424,8 @@ class Executor:
     def _complete_step(self):
         print("[EXEC] Paso completado")
         self._set_motor(False)
+        self._motor_pause_active = False
+        self._motor_pause_timer = 0
         if self._current_action in Executor.WATER_ACTIONS:
             drain = self._drain_seconds(self._current_level)
             if drain > 0:
@@ -414,7 +451,12 @@ class Executor:
 
     def _start_motor(self):
         self._motor_dir = "FWD"
+        self._motor_interval = self._motor_alt_seconds()
+        self._motor_pause_duration = self._motor_pause_seconds()
         self._motor_timer = self._motor_interval
+        self._motor_pause_timer = 0
+        self._motor_pause_active = False
+        self._motor_next_dir = "REV"
         self._set_motor(True, direction=self._motor_dir)
 
     def _set_motor(self, run: bool, direction: Optional[str] = None, force_speed: Optional[str] = None):
@@ -435,14 +477,45 @@ class Executor:
             self.controller.motor(run=run, direction=self._motor_dir, speed=speed)
 
     def _update_motor_alt(self):
-        if not self._motor_running:
+        if not self._motor_is_agitation:
             return
         if self._motor_interval <= 0:
             return
-        self._motor_timer -= 1
-        if self._motor_timer <= 0:
-            new_dir = "REV" if self._motor_dir == "FWD" else "FWD"
-            print(f"[EXEC] Alternando motor a {new_dir}")
-            self._set_motor(True, direction=new_dir)
+
+        if self._motor_pause_active:
+            if self._motor_pause_timer > 0:
+                self._motor_pause_timer = max(0, self._motor_pause_timer - 1)
+            if self._motor_pause_timer > 0:
+                return
+            self._motor_pause_active = False
+            next_dir = self._motor_next_dir or ("REV" if self._motor_dir == "FWD" else "FWD")
+            print(f"[EXEC] Alternando motor a {next_dir}")
+            self._set_motor(True, direction=next_dir)
             self._motor_timer = self._motor_interval
+            self._motor_next_dir = "REV" if next_dir == "FWD" else "FWD"
+            return
+
+        if not self._motor_running:
+            return
+
+        if self._motor_timer > 0:
+            self._motor_timer -= 1
+        if self._motor_timer > 0:
+            return
+
+        next_dir = "REV" if self._motor_dir == "FWD" else "FWD"
+        pause = self._motor_pause_duration
+        if pause > 0:
+            print(f"[EXEC] Pausa de alternancia ({pause}s)")
+            self._motor_pause_active = True
+            self._motor_pause_timer = pause
+            self._motor_next_dir = next_dir
+            if self._motor_running:
+                self._set_motor(False)
+            return
+
+        print(f"[EXEC] Alternando motor a {next_dir}")
+        self._set_motor(True, direction=next_dir)
+        self._motor_timer = self._motor_interval
+        self._motor_next_dir = "REV" if next_dir == "FWD" else "FWD"
 

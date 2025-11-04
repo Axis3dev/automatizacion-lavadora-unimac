@@ -118,6 +118,12 @@ class SettingsDialog(tk.Toplevel):
             alt_def = 0
         self.var_alt = tk.StringVar(value=str(max(0, alt_def)))
 
+        try:
+            pause_def = int(glb.get("motor_pause_seconds", 2) or 0)
+        except Exception:
+            pause_def = 2
+        self.var_motor_pause = tk.StringVar(value=str(max(0, pause_def)))
+
         root = ttk.Frame(self, padding=12); root.pack(fill="both", expand=True)
         main = ttk.Frame(root); main.pack(fill="both", expand=True, pady=(0,8))
         main.columnconfigure(0, weight=1); main.columnconfigure(1, weight=1)
@@ -192,8 +198,12 @@ class SettingsDialog(tk.Toplevel):
         e_alt = ttk.Entry(varsf, textvariable=self.var_alt, font=self.f_field, width=10, justify="right")
         e_alt.grid(row=15, column=1, sticky="w", pady=4)
 
+        ttk.Label(varsf, text="Pausa entre alternancias (s):", font=self.f_label).grid(row=16, column=0, sticky="w", padx=(0,8), pady=4)
+        e_alt_pause = ttk.Entry(varsf, textvariable=self.var_motor_pause, font=self.f_field, width=10, justify="right")
+        e_alt_pause.grid(row=16, column=1, sticky="w", pady=4)
+
         only_num = (self.register(lambda P: P.isdigit() or P==""), "%P")
-        for ent in (e_l, e_e, e_i, e_q1, e_q2, e_q3, e_q4, e_dl, e_de, e_di, e_alt):
+        for ent in (e_l, e_e, e_i, e_q1, e_q2, e_q3, e_q4, e_dl, e_de, e_di, e_alt, e_alt_pause):
             ent.configure(validate="key", validatecommand=only_num)
             ent.bind("<FocusIn>", lambda ev, widget=ent: self._show_kb(widget))
 
@@ -299,6 +309,15 @@ class SettingsDialog(tk.Toplevel):
         try: alt = int(self.var_alt.get() or "0")
         except Exception: alt = 0
         alt = max(0, alt)
+
+        try:
+            motor_pause = int(self.var_motor_pause.get() or "0")
+        except Exception:
+            motor_pause = 0
+        motor_pause = max(0, motor_pause)
+
+        glb = self.CFG.setdefault("globals", {})
+        glb["motor_pause_seconds"] = motor_pause
 
         port = (self.port_var.get().strip() or None)
         try: baud = int(self.baud_var.get() or 0)
