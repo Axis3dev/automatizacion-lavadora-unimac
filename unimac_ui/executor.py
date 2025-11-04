@@ -98,6 +98,8 @@ class Executor:
         self.in_drain_pause = False
         self._drain_profile = None
         self._drain_label = None
+        self.ui_send_event: Optional[Callable[..., None]] = None
+        self.current_speed: Optional[str] = None
 
     # ---------- utilidades de configuración ----------
     @staticmethod
@@ -200,6 +202,7 @@ class Executor:
         self._motor_running = False
         self._drain_profile = None
         self._drain_label = None
+        self.current_speed = None
 
     def start(self):
         if not self.cycle or not self.cycle.pasos:
@@ -245,6 +248,7 @@ class Executor:
             self.controller.cancel_all()
         self._send_event({"event": "stop"})
         self.cb.on_status("Detenido (paro seguro)")
+        self.current_speed = None
 
     def finish(self):
         self.state = Executor.IDLE
@@ -255,6 +259,7 @@ class Executor:
         self._send_event({"event": "finish"})
         self.cb.on_status("Ciclo terminado")
         self.cb.on_finish()
+        self.current_speed = None
 
     # ---------- tick principal ----------
     def tick(self):
@@ -339,6 +344,7 @@ class Executor:
         self.hw.drain_open(True)
         self._send_event({"event": "emergency"})
         self.cb.on_status("Paro de emergencia")
+        self.current_speed = None
 
     def _emit_start_event(self):
         total = self._safe_int(getattr(self.cycle, "total_duracion", 0), 0)
@@ -353,7 +359,9 @@ class Executor:
         self._current_action = (getattr(step, "accion", "") or "").strip().lower()
         self._current_level = self._normalize_level(getattr(step, "nivel_agua", None))
         self._agua_temp = getattr(self.cycle, "agua_temp", None)
-        self._motor_speed = self._normalize_speed(getattr(step, "velocidad", None))
+        default_speed = "alto" if self._current_action in Executor.SPIN_ACTIONS else "medio"
+        raw_speed = getattr(step, "velocidad", None) or default_speed
+        self._motor_speed = self._normalize_speed(raw_speed)
         self._motor_interval = self._motor_alt_seconds()
         self._motor_pause_duration = self._motor_pause_seconds()
         self._motor_timer = self._motor_interval
@@ -384,6 +392,7 @@ class Executor:
         self.hw.stop_all()
 
         if self._current_action in Executor.WATER_ACTIONS:
+            self._apply_speed_for_step(step)
             self._start_water_step(step)
         elif self._current_action in Executor.SPIN_ACTIONS:
             self._start_spin_step(step)
@@ -421,8 +430,9 @@ class Executor:
         print(f"[EXEC] Iniciando centrifugado")
         self.hw.drain_open(True)
         self._send_event({"event": "drain", "open": True, "seconds": self.step_remaining})
-        self.hw.spin(getattr(step, "velocidad", "alto"))
-        self._set_motor(True, direction="FWD", force_speed=self._normalize_speed(getattr(step, "velocidad", "alto")))
+        speed = self._apply_speed_for_step(step)
+        self.hw.spin(speed)
+        self._set_motor(True, direction="FWD")
         if self.controller and hasattr(self.controller, "run_drain"):
             self.controller.run_drain(self.step_remaining)
 
@@ -432,6 +442,20 @@ class Executor:
         self._send_event({"event": "drain", "open": True, "seconds": self.step_remaining})
         if self.controller and hasattr(self.controller, "run_drain"):
             self.controller.run_drain(self.step_remaining)
+
+    def _apply_speed_for_step(self, step) -> str:
+        default_speed = "alto" if self._current_action in Executor.SPIN_ACTIONS else "medio"
+        raw_speed = getattr(step, "velocidad", None) or default_speed
+        normalized = self._normalize_speed(raw_speed)
+        self._motor_speed = normalized
+        if normalized != self.current_speed:
+            self.current_speed = normalized
+            dispatcher = getattr(self, "ui_send_event", None)
+            if callable(dispatcher):
+                dispatcher("speed", valor=normalized)
+            else:
+                self._send_event({"event": "speed", "nivel": normalized})
+        return normalized
 
     def _resume_current_step(self):
         if not self._current_step:
@@ -490,22 +514,17 @@ class Executor:
         self._motor_next_dir = "REV"
         self._set_motor(True, direction=self._motor_dir)
 
-    def _set_motor(self, run: bool, direction: Optional[str] = None, force_speed: Optional[str] = None):
+    def _set_motor(self, run: bool, direction: Optional[str] = None):
         if direction:
             self._motor_dir = direction
-        if force_speed:
-            self._motor_speed = force_speed
-        speed = self._motor_speed
         self._motor_running = run
-        payload = {
-            "event": "motor",
-            "run": bool(run),
-            "dir": self._motor_dir,
-            "speed": speed,
-        }
-        self._send_event(payload)
+        if run:
+            event = "motor_fwd" if self._motor_dir == "FWD" else "motor_rev"
+        else:
+            event = "motor_off"
+        self._send_event({"event": event})
         if self.controller and hasattr(self.controller, "motor"):
-            self.controller.motor(run=run, direction=self._motor_dir, speed=speed)
+            self.controller.motor(run=run, direction=self._motor_dir, speed=self._motor_speed)
 
     def _update_motor_alt(self):
         if not self._motor_is_agitation:
@@ -549,4 +568,13 @@ class Executor:
         self._set_motor(True, direction=next_dir)
         self._motor_timer = self._motor_interval
         self._motor_next_dir = "REV" if next_dir == "FWD" else "FWD"
+
+    def on_serial_reconnected(self):
+        if not self.current_speed:
+            return
+        dispatcher = getattr(self, "ui_send_event", None)
+        if callable(dispatcher):
+            dispatcher("speed", valor=self.current_speed)
+        else:
+            self._send_event({"event": "speed", "nivel": self.current_speed})
 

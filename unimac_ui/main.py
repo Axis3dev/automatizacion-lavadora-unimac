@@ -99,6 +99,9 @@ class WasherUI(tk.Tk):
             get_drain_seconds=self._drain_table,
             get_motor_alt_seconds=self._motor_alt_seconds,
         )
+        self.executor.ui_send_event = lambda ev, **kw: (
+            self._send_speed(kw.get("valor")) if ev == "speed" else self.serial.send_json({"event": ev, **kw})
+        )
 
         # Estado UI
         self._settings_win = None
@@ -219,6 +222,12 @@ class WasherUI(tk.Tk):
         self._update_comm_panel_now(); self.after(self.COMM_UI_MS, self._update_comm_panel_periodic)
 
     def _send_event(self, event: str, **kw): self.serial.send_json({"event": event, **kw})
+
+    def _send_speed(self, nivel: Optional[str]):
+        nivel = (nivel or "medio").lower()
+        if nivel not in ("bajo", "medio", "alto"):
+            nivel = "medio"
+        self.serial.send_json({"event": "speed", "nivel": nivel})
 
     # configuración global normalizada
     @staticmethod
@@ -541,6 +550,8 @@ class WasherUI(tk.Tk):
                     self.toast(f"Conectado a {port}")
                 else:
                     self.toast("Dispositivo conectado")
+            if hasattr(self.executor, "on_serial_reconnected"):
+                self.executor.on_serial_reconnected()
         self.after(0, _cb)
 
     def _on_comm_disconnected(self):

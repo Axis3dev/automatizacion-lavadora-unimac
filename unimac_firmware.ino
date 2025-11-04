@@ -48,6 +48,7 @@ DrainTimer drainTask = {false, true, 0};
 
 bool emergencyLatched = false;
 bool vfdFaultLatched = false;
+String speedNivel = "medio";
 
 void sendJson(const JsonDocument &doc) {
   serializeJson(doc, Serial);
@@ -77,11 +78,14 @@ void setFill(const char *temp, bool on);
 void stopFill();
 void doseChem(uint8_t index, uint32_t ms);
 void stopChem(uint8_t index);
-void setMotor(bool run, const char *dir, const char *speed);
 void setSpeedNone();
 void setSpeedBaja();
 void setSpeedMedia();
 void setSpeedAlta();
+void setSpeedPresets(const String &nivel);
+void motorFwd();
+void motorRev();
+void motorOff();
 
 uint32_t secondsToMs(JsonVariant value) {
   if (value.isNull()) {
@@ -194,18 +198,38 @@ void handleDrain(JsonDocument &doc) {
   sendAck("drain", ack);
 }
 
-void handleMotor(JsonDocument &doc) {
-  bool run = doc["run"].as<bool>();
-  const char *dir = doc["dir"] | "FWD";
-  const char *speed = doc["speed"] | "alto";
+void handleSpeed(JsonDocument &doc) {
+  const char *nivelPtr = doc["nivel"] | "medio";
+  String nivel = String(nivelPtr);
+  nivel.toLowerCase();
+  if (nivel != "bajo" && nivel != "medio" && nivel != "alto") {
+    nivel = "medio";
+  }
+  speedNivel = nivel;
+  setSpeedPresets(speedNivel);
 
-  setMotor(run, dir, speed);
+  StaticJsonDocument<160> ack;
+  ack["nivel"] = speedNivel;
+  sendAck("speed", ack);
+}
 
-  StaticJsonDocument<192> ack;
-  ack["run"] = run;
-  ack["dir"] = dir;
-  ack["speed"] = speed;
-  sendAck("motor", ack);
+void handleMotorFwd() {
+  motorFwd();
+  StaticJsonDocument<128> ack;
+  ack["dir"] = "FWD";
+  sendAck("motor_fwd", ack);
+}
+
+void handleMotorRev() {
+  motorRev();
+  StaticJsonDocument<128> ack;
+  ack["dir"] = "REV";
+  sendAck("motor_rev", ack);
+}
+
+void handleMotorOff() {
+  motorOff();
+  sendAck("motor_off");
 }
 
 void handlePause(JsonDocument &doc) {
@@ -265,8 +289,14 @@ void processEvent(JsonDocument &doc) {
     handleChem(doc);
   } else if (strcmp(event, "drain") == 0) {
     handleDrain(doc);
-  } else if (strcmp(event, "motor") == 0) {
-    handleMotor(doc);
+  } else if (strcmp(event, "speed") == 0) {
+    handleSpeed(doc);
+  } else if (strcmp(event, "motor_fwd") == 0) {
+    handleMotorFwd();
+  } else if (strcmp(event, "motor_rev") == 0) {
+    handleMotorRev();
+  } else if (strcmp(event, "motor_off") == 0) {
+    handleMotorOff();
   } else if (strcmp(event, "pause") == 0) {
     handlePause(doc);
   } else if (strcmp(event, "finish") == 0) {
@@ -318,6 +348,7 @@ void setup() {
   }
 
   allSafeOff();
+  setSpeedPresets(speedNivel);
 
   StaticJsonDocument<48> boot;
   boot["boot"] = "ok";
@@ -369,7 +400,8 @@ void loop() {
 
   bool vfdFault = digitalRead(PIN_VFD_FAULT) == HIGH;
   if (vfdFault && !vfdFaultLatched) {
-    setMotor(false, "FWD", "bajo");
+    motorOff();
+    setSpeedNone();
     sendStatus("vfd_fault");
     vfdFaultLatched = true;
   } else if (!vfdFault) {
@@ -385,11 +417,9 @@ void allSafeOff() {
   digitalWrite(PIN_Q4_BLANQUEADOR, LOW);
   digitalWrite(PIN_V_AF_FRIA, LOW);
   digitalWrite(PIN_V_AC_CALIENTE, LOW);
-  digitalWrite(PIN_MOTOR_FWD, LOW);
-  digitalWrite(PIN_MOTOR_REV, LOW);
-  digitalWrite(PIN_VFD_RUN, LOW);
-  digitalWrite(PIN_VFD_DIR, LOW);
+  motorOff();
   setSpeedNone();
+  speedNivel = "medio";
   setDrain(true);
   digitalWrite(PIN_LOCK_PUERTA, LOW);
   fillTask.active = false;
@@ -459,36 +489,6 @@ void stopChem(uint8_t index) {
   }
 }
 
-void setMotor(bool run, const char *dir, const char *speed) {
-  if (!run) {
-    digitalWrite(PIN_MOTOR_FWD, LOW);
-    digitalWrite(PIN_MOTOR_REV, LOW);
-    digitalWrite(PIN_VFD_RUN, LOW);
-    setSpeedNone();
-    return;
-  }
-
-  if (strcmp(dir, "REV") == 0) {
-    digitalWrite(PIN_MOTOR_FWD, LOW);
-    digitalWrite(PIN_MOTOR_REV, HIGH);
-    digitalWrite(PIN_VFD_DIR, HIGH);
-  } else {
-    digitalWrite(PIN_MOTOR_REV, LOW);
-    digitalWrite(PIN_MOTOR_FWD, HIGH);
-    digitalWrite(PIN_VFD_DIR, LOW);
-  }
-
-  if (strcmp(speed, "bajo") == 0) {
-    setSpeedBaja();
-  } else if (strcmp(speed, "medio") == 0) {
-    setSpeedMedia();
-  } else {
-    setSpeedAlta();
-  }
-
-  digitalWrite(PIN_VFD_RUN, HIGH);
-}
-
 void setSpeedNone() {
   digitalWrite(PIN_SPEED_BAJA, LOW);
   digitalWrite(PIN_SPEED_MEDIA, LOW);
@@ -511,4 +511,36 @@ void setSpeedAlta() {
   digitalWrite(PIN_SPEED_BAJA, LOW);
   digitalWrite(PIN_SPEED_MEDIA, LOW);
   digitalWrite(PIN_SPEED_ALTA, HIGH);
+}
+
+void setSpeedPresets(const String &nivel) {
+  setSpeedNone();
+  if (nivel == "bajo") {
+    setSpeedBaja();
+  } else if (nivel == "medio") {
+    setSpeedMedia();
+  } else {
+    setSpeedAlta();
+  }
+}
+
+void motorFwd() {
+  digitalWrite(PIN_MOTOR_REV, LOW);
+  digitalWrite(PIN_MOTOR_FWD, HIGH);
+  digitalWrite(PIN_VFD_DIR, LOW);
+  digitalWrite(PIN_VFD_RUN, HIGH);
+}
+
+void motorRev() {
+  digitalWrite(PIN_MOTOR_FWD, LOW);
+  digitalWrite(PIN_MOTOR_REV, HIGH);
+  digitalWrite(PIN_VFD_DIR, HIGH);
+  digitalWrite(PIN_VFD_RUN, HIGH);
+}
+
+void motorOff() {
+  digitalWrite(PIN_MOTOR_FWD, LOW);
+  digitalWrite(PIN_MOTOR_REV, LOW);
+  digitalWrite(PIN_VFD_RUN, LOW);
+  digitalWrite(PIN_VFD_DIR, LOW);
 }
