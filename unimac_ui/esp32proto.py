@@ -4,6 +4,7 @@ Control de ESP32 (orquestador de comandos).
 - Alternancia de giro durante agitación (configurable).
 - Dosificación Q1..Q4 usando segundos definidos por GUI.
 - Drenaje entre pasos lo controla main; aquí NO se abre al final de pasos con agua.
+- Respeta los tiempos de llenado configurados para cada nivel de agua.
 """
 
 import unicodedata
@@ -33,20 +34,32 @@ class Esp32Controller:
                  send: Callable[[Dict], None],
                  on_info: Optional[Callable[[str], None]] = None,
                  get_dose_seconds: Optional[Callable[[], Dict[str,int]]] = None,
-                 get_alt_seconds: Optional[Callable[[], int]] = None):
+                 get_alt_seconds: Optional[Callable[[], int]] = None,
+                 get_fill_seconds: Optional[Callable[[], Dict[str,int]]] = None,
+                 cancel_after: Optional[Callable[[object], None]] = None):
         self.after = after
         self.send = send
         self.on_info = on_info or (lambda s: None)
         self.get_dose_seconds = get_dose_seconds or (lambda: {"Q1":4,"Q2":3,"Q3":2,"Q4":2})
         self.get_alt_seconds = get_alt_seconds or (lambda: 0)
+        self.get_fill_seconds = get_fill_seconds or (lambda: {"ligero":5,"estandar":8,"intenso":12})
+        self.cancel_after = cancel_after or (lambda job: None)
 
         self._agitate_toggle_job = None
         self._agitate_stop_job = None
         self._current_dir = "cw"
+        self._fill_stop_job = None
 
     # ---------- util ----------
     def _after(self, ms: int, cb: Callable):
         return self.after(max(0, int(ms)), cb)
+
+    def _cancel_job(self, job):
+        if job:
+            try:
+                self.cancel_after(job)
+            except Exception:
+                pass
 
     def _out(self, target: str, on: int):
         self.send({"cmd": "out", "target": target, "on": 1 if on else 0})
@@ -62,6 +75,8 @@ class Esp32Controller:
 
     # ---------- ciclo ----------
     def start_cycle(self):
+        self._cancel_job(self._fill_stop_job)
+        self._fill_stop_job = None
         # Drenaje (NA) cerrar = energizado
         self._out("DRAIN", 1)
         # Cerrar puerta
@@ -72,8 +87,7 @@ class Esp32Controller:
     def finish_cycle(self):
         # Paro seguro
         self._vfd(run="off")
-        self._out("WATER_COLD", 0)
-        self._out("WATER_HOT", 0)
+        self._fill_off()
         self._out("Q1", 0); self._out("Q2", 0); self._out("Q3", 0); self._out("Q4", 0)
         # Drenaje NA: abrir
         self._out("DRAIN", 0)
@@ -85,8 +99,7 @@ class Esp32Controller:
     def cancel_all(self):
         # Paro inmediato
         self._vfd(run="off")
-        self._out("WATER_COLD", 0)
-        self._out("WATER_HOT", 0)
+        self._fill_off()
         self._out("Q1", 0); self._out("Q2", 0); self._out("Q3", 0); self._out("Q4", 0)
         # Drenaje NA: abrir
         self._out("DRAIN", 0)
@@ -103,7 +116,7 @@ class Esp32Controller:
         quimicos = quimicos or []
 
         if a in ("prelavado", "lavado", "enjuague"):
-            self._run_fill_agitate(agua=agua, quimicos=quimicos, duracion=duracion, velocidad=velocidad)
+            self._run_fill_agitate(nivel_agua=nivel_agua, agua=agua, quimicos=quimicos, duracion=duracion, velocidad=velocidad)
             return
         if a in ("centrifugado", "spin"):
             self._run_spin(duracion=duracion, velocidad=velocidad or "alto")
@@ -114,15 +127,8 @@ class Esp32Controller:
 
         self._beep(60)  # paso desconocido
 
-    def _run_fill_agitate(self, agua: Optional[str], quimicos: List[str], duracion: int, velocidad: Optional[str]):
-        # Agua
-        if agua:
-            if agua.lower() == "fria":
-                self._out("WATER_COLD", 1); self._out("WATER_HOT", 0)
-            elif agua.lower() == "caliente":
-                self._out("WATER_HOT", 1); self._out("WATER_COLD", 0)
-        else:
-            self._out("WATER_COLD", 0); self._out("WATER_HOT", 0)
+    def _run_fill_agitate(self, nivel_agua: Optional[str], agua: Optional[str], quimicos: List[str], duracion: int, velocidad: Optional[str]):
+        self._start_fill(nivel_agua, agua)
 
         # Dosificación con segundos reales
         doses = self.get_dose_seconds()
@@ -156,23 +162,24 @@ class Esp32Controller:
         self._agitate_toggle_job = self._after(alt_sec * 1000, toggle)
 
     def _cancel_agitate_jobs(self):
-        # No hay cancelación directa de after; se re-sincroniza en fin de paso
+        if self._agitate_toggle_job:
+            self._cancel_job(self._agitate_toggle_job)
+        if self._agitate_stop_job:
+            self._cancel_job(self._agitate_stop_job)
         self._agitate_toggle_job = None
         self._agitate_stop_job = None
 
     def _end_step_no_drain(self):
         # Parar agitación y agua/químicos
         self._vfd(run="off")
-        self._out("WATER_COLD", 0)
-        self._out("WATER_HOT", 0)
+        self._fill_off()
         self._out("Q1", 0); self._out("Q2", 0); self._out("Q3", 0); self._out("Q4", 0)
         self._beep(100)
         self._cancel_agitate_jobs()
 
     def _run_spin(self, duracion: int, velocidad: str):
         # Spin: abrir drenaje (NA) y centrifugar
-        self._out("WATER_COLD", 0)
-        self._out("WATER_HOT", 0)
+        self._fill_off()
         self._out("Q1", 0); self._out("Q2", 0); self._out("Q3", 0); self._out("Q4", 0)
         self._out("DRAIN", 0)
 
@@ -195,8 +202,7 @@ class Esp32Controller:
         self._run_drain(duracion=max(0, int(duracion or 0)))
 
     def _run_drain(self, duracion: int):
-        self._out("WATER_COLD", 0)
-        self._out("WATER_HOT", 0)
+        self._fill_off()
         self._out("Q1", 0); self._out("Q2", 0); self._out("Q3", 0); self._out("Q4", 0)
         self._out("DRAIN", 0)
         self._after(int(max(0, duracion)) * 1000, self._end_drain)
@@ -205,6 +211,49 @@ class Esp32Controller:
         # Cerrar drenaje (NA) para próximo llenado
         self._out("DRAIN", 1)
         self._beep(80)
+
+    def _fill_seconds_for(self, level: Optional[str]) -> int:
+        table = self.get_fill_seconds() or {}
+        key = (level or "estandar").strip().lower()
+        try:
+            return max(0, int(table.get(key, table.get("estandar", 8))))
+        except Exception:
+            return 8
+
+    def _start_fill(self, nivel_agua: Optional[str], agua: Optional[str]):
+        if self._fill_stop_job:
+            self._cancel_job(self._fill_stop_job)
+            self._fill_stop_job = None
+
+        target = (agua or "").strip().lower()
+        if target == "fria":
+            self._out("WATER_COLD", 1); self._out("WATER_HOT", 0)
+        elif target == "caliente":
+            self._out("WATER_HOT", 1); self._out("WATER_COLD", 0)
+        elif target == "tibia":
+            self._out("WATER_COLD", 1); self._out("WATER_HOT", 1)
+        else:
+            # default: agua fría
+            self._out("WATER_COLD", 1); self._out("WATER_HOT", 0)
+
+        seconds = self._fill_seconds_for(nivel_agua)
+        if seconds <= 0:
+            self._fill_off()
+            return
+
+        def _stop():
+            self._fill_off(from_timer=True)
+            self._beep(50)
+
+        self._fill_stop_job = self._after(seconds * 1000, _stop)
+
+    def _fill_off(self, from_timer: bool = False):
+        job = self._fill_stop_job
+        self._fill_stop_job = None
+        if job and not from_timer:
+            self._cancel_job(job)
+        self._out("WATER_COLD", 0)
+        self._out("WATER_HOT", 0)
 
     def _normalize_chem(self, ident: str) -> Optional[str]:
         if ident is None:

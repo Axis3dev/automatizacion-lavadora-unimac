@@ -67,7 +67,10 @@ class WasherUI(tk.Tk):
         self.CFG = CFG
 
         # HW / Executor
-        self.hw = HardwareIO()
+        self.hw = HardwareIO(
+            get_fill_seconds=lambda: self.CFG.get("globals", {}).get("water_fill_seconds", {"ligero":5,"estandar":8,"intenso":12}),
+            get_dose_seconds=lambda: self.CFG.get("globals", {}).get("chem_dose_seconds", {"Q1":4,"Q2":3,"Q3":2,"Q4":2})
+        )
         self.executor = Executor(self.hw,
                                  self._update_status_text,
                                  self._on_tick,
@@ -77,11 +80,13 @@ class WasherUI(tk.Tk):
         # Controller con accessors a config (dosis y alternancia)
         self.controller = Esp32Controller(
             after=self.after,
+            cancel_after=self.after_cancel,
             send=lambda obj: self.serial.send_json(obj),
             on_info=lambda s: self.toast(s),
             get_dose_seconds=lambda: self.CFG.get("globals", {}).get("chem_dose_seconds",
                                {"Q1":4,"Q2":3,"Q3":2,"Q4":2}),
-            get_alt_seconds=lambda: int(self.CFG.get("globals", {}).get("alternancia_motor_s", 0) or 0)
+            get_alt_seconds=lambda: int(self.CFG.get("globals", {}).get("alternancia_motor_s", 0) or 0),
+            get_fill_seconds=lambda: self.CFG.get("globals", {}).get("water_fill_seconds", {"ligero":5,"estandar":8,"intenso":12})
         )
 
         # Estado UI

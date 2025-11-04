@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
+import threading
 import unicodedata
+from typing import Callable, Dict, Optional
 
 
 def _normalize(text: str) -> str:
@@ -8,10 +10,54 @@ def _normalize(text: str) -> str:
     return text.replace(" ", "").replace("-", "").upper()
 
 
+def _safe_int(value, default: int = 0) -> int:
+    try:
+        return max(0, int(value))
+    except Exception:
+        return default
+
+
 class HardwareIO:
     """Stub de hardware — remplázalo por GPIO/Modbus/PLC en producción."""
-    def fill(self, temp):
-        print(f"[HW] Llenando agua: {temp or 'N/A'}")
+
+    def __init__(self,
+                 get_fill_seconds: Optional[Callable[[], Dict[str, int]]] = None,
+                 get_dose_seconds: Optional[Callable[[], Dict[str, int]]] = None):
+        self.get_fill_seconds = get_fill_seconds or (lambda: {"ligero": 5, "estandar": 8, "intenso": 12})
+        self.get_dose_seconds = get_dose_seconds or (lambda: {"Q1": 4, "Q2": 3, "Q3": 2, "Q4": 2})
+        self._fill_timer: Optional[threading.Timer] = None
+        self._chem_timers: Dict[str, threading.Timer] = {}
+
+    def _cancel_timer(self, timer: Optional[threading.Timer]):
+        if timer:
+            try:
+                timer.cancel()
+            except Exception:
+                pass
+
+    def _fill_seconds_for(self, level: Optional[str]) -> int:
+        table = self.get_fill_seconds() or {}
+        key = (level or "estandar").strip().lower()
+        return _safe_int(table.get(key, table.get("estandar", 8)), 8)
+
+    def _dose_seconds_for(self, ident: str) -> int:
+        table = self.get_dose_seconds() or {}
+        return _safe_int(table.get(ident, 0), 0)
+
+    def fill(self, nivel: Optional[str]):
+        secs = self._fill_seconds_for(nivel)
+        self._cancel_timer(self._fill_timer)
+        if secs > 0:
+            print(f"[HW] Llenando agua ({nivel or 'estandar'}) durante {secs}s")
+
+            def _on_finish():
+                print("[HW] Llenado completado")
+
+            self._fill_timer = threading.Timer(secs, _on_finish)
+            self._fill_timer.daemon = True
+            self._fill_timer.start()
+        else:
+            print(f"[HW] Llenando agua ({nivel or 'estandar'})")
 
     CHEM_LABELS = {
         "Q1": "Detergente",
@@ -35,7 +81,21 @@ class HardwareIO:
         norm = _normalize(key)
         hw_ident = self.CHEM_ALIASES.get(norm, key.upper())
         pretty = self.CHEM_LABELS.get(hw_ident, key)
-        print(f"[HW] Químico {pretty} ({hw_ident})")
+        secs = self._dose_seconds_for(hw_ident)
+        timer = self._chem_timers.pop(hw_ident, None)
+        self._cancel_timer(timer)
+        if secs > 0:
+            print(f"[HW] Dosificando {pretty} ({hw_ident}) durante {secs}s")
+
+            def _done():
+                print(f"[HW] {pretty} completado")
+
+            timer = threading.Timer(secs, _done)
+            timer.daemon = True
+            self._chem_timers[hw_ident] = timer
+            timer.start()
+        else:
+            print(f"[HW] Dosificando {pretty} ({hw_ident})")
 
     def drain_open(self, enable: bool):
         print(f"[HW] Drenaje {'ABIERTO' if enable else 'CERRADO'}")
@@ -45,8 +105,13 @@ class HardwareIO:
             print(f"[HW] Spin {level}")
 
     def stop_all(self):
+        self._cancel_timer(self._fill_timer)
+        self._fill_timer = None
+        for timer in list(self._chem_timers.values()):
+            self._cancel_timer(timer)
+        self._chem_timers.clear()
         print("[HW] Paro seguro")
-    
+
     def is_emergency_pressed(self) -> bool:
         """Indica si el paro de emergencia esté presionado.
 
