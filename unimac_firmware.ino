@@ -38,7 +38,7 @@ struct TimedPin {
 
 struct DrainTimer {
   bool active;
-  bool openedState;
+  bool finalOpen;
   uint32_t until;
 };
 
@@ -167,20 +167,30 @@ void handleChem(JsonDocument &doc) {
 }
 
 void handleDrain(JsonDocument &doc) {
-  bool open = doc["open"].as<bool>();
+  bool openCmd = doc.containsKey("open") ? doc["open"].as<bool>() : true;
+  double secondsValue = doc.containsKey("seconds") ? doc["seconds"].as<double>() : 0.0;
   uint32_t duration = secondsToMs(doc["seconds"]);
+  const char *profile = doc.containsKey("profile") ? doc["profile"].as<const char *>() : "";
+  const char *label = doc.containsKey("label") ? doc["label"].as<const char *>() : "";
 
-  setDrain(open);
+  setDrain(openCmd);
 
+  drainTask.active = false;
   if (duration > 0) {
     drainTask.active = true;
-    drainTask.openedState = open;
+    drainTask.finalOpen = openCmd ? false : true;
     drainTask.until = millis() + duration;
   }
 
-  StaticJsonDocument<128> ack;
-  ack["open"] = open;
-  ack["ms"] = duration;
+  StaticJsonDocument<192> ack;
+  ack["open"] = openCmd;
+  ack["seconds"] = secondsValue;
+  if (profile && profile[0]) {
+    ack["profile"] = profile;
+  }
+  if (label && label[0]) {
+    ack["label"] = label;
+  }
   sendAck("drain", ack);
 }
 
@@ -344,8 +354,7 @@ void loop() {
   }
 
   if (drainTask.active && now >= drainTask.until) {
-    // After timed drain, open drain for seguridad
-    setDrain(true);
+    setDrain(drainTask.finalOpen);
     drainTask.active = false;
   }
 
@@ -387,6 +396,8 @@ void allSafeOff() {
   for (uint8_t i = 0; i < 4; ++i) {
     chemTasks[i].active = false;
   }
+  drainTask.active = false;
+  drainTask.finalOpen = true;
 }
 
 void setDrain(bool open) {

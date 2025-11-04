@@ -96,6 +96,8 @@ class Executor:
         self._motor_next_dir = "FWD"
         self._motor_is_agitation = False
         self.in_drain_pause = False
+        self._drain_profile = None
+        self._drain_label = None
 
     # ---------- utilidades de configuración ----------
     @staticmethod
@@ -145,6 +147,15 @@ class Executor:
         return spd
 
     @staticmethod
+    def _drain_profile_info(level: Optional[str]):
+        key = Executor._normalize_level(level)
+        if key == "ligero":
+            return "ligero", "DRENAJE LIGERO"
+        if key == "intenso":
+            return "intenso", "DRENAJE INTENSO"
+        return "estandar", "DRENAJE ESTANDAR"
+
+    @staticmethod
     def _chem_ident(name: str) -> Optional[str]:
         if not name:
             return None
@@ -187,6 +198,8 @@ class Executor:
         self._drain_remaining = 0
         self._current_step = None
         self._motor_running = False
+        self._drain_profile = None
+        self._drain_label = None
 
     def start(self):
         if not self.cycle or not self.cycle.pasos:
@@ -303,10 +316,17 @@ class Executor:
 
         if self._drain_remaining <= 0:
             self.hw.drain_open(False)
-            self._send_event({"event": "drain", "open": False, "seconds": 0})
+            payload = {"event": "drain", "open": False}
+            if self._drain_profile:
+                payload["profile"] = self._drain_profile
+            if self._drain_label:
+                payload["label"] = self._drain_label
+            self._send_event(payload)
             if self.controller and hasattr(self.controller, "close_drain"):
                 self.controller.close_drain()
             self.in_drain_pause = False
+            self._drain_profile = None
+            self._drain_label = None
             self._advance_step()
 
     # ---------- helpers ----------
@@ -434,12 +454,23 @@ class Executor:
                 self.in_drain_pause = True
                 self.cb.on_status("Drenando…")
                 self.hw.drain_open(True)
-                self._send_event({"event": "drain", "open": True, "seconds": drain})
+                profile, label = self._drain_profile_info(self._current_level)
+                self._drain_profile = profile
+                self._drain_label = label
+                self._send_event({
+                    "event": "drain",
+                    "open": True,
+                    "seconds": drain,
+                    "profile": profile,
+                    "label": label,
+                })
                 self._send_event({"event": "pause", "reason": "drain_pause", "seconds": drain})
                 if self.controller and hasattr(self.controller, "run_drain"):
                     self.controller.run_drain(drain)
                 return
         self.in_drain_pause = False
+        self._drain_profile = None
+        self._drain_label = None
         self._advance_step()
 
     def _advance_step(self):
