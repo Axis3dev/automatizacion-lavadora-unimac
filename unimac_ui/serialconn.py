@@ -1,317 +1,267 @@
 # -*- coding: utf-8 -*-
-import os
+"""Gestión de conexión serie y vigilancia de puertos para ESP32."""
+
 import json
-import time
+import os
 import threading
-from typing import Optional, List, Dict
+import time
+from typing import Callable, Iterable, Optional
 
 try:
-    import serial
-    from serial.tools import list_ports
-except Exception:
-    serial = None
-    list_ports = None
+    from serial import Serial, SerialException  # type: ignore
+    from serial.tools import list_ports  # type: ignore
+except Exception:  # pragma: no cover - entorno sin pyserial
+    Serial = None  # type: ignore
+    SerialException = Exception  # type: ignore
+    list_ports = None  # type: ignore
 
-# ========= Config persistente =========
+BLOCKED_PORTS = ("/dev/ttyAMA0", "ttyAMA0")
+
+
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
 
-def load_config() -> Dict:
+
+def load_config() -> dict:
     try:
-        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
+        with open(CONFIG_PATH, "r", encoding="utf-8") as fh:
+            return json.load(fh)
     except Exception:
         return {}
 
-def save_config(cfg: Dict):
+
+def save_config(cfg: dict) -> None:
     try:
-        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-            json.dump(cfg, f, indent=2, ensure_ascii=False)
+        with open(CONFIG_PATH, "w", encoding="utf-8") as fh:
+            json.dump(cfg, fh, indent=2, ensure_ascii=False)
     except Exception:
         pass
 
-CFG: Dict = load_config()
-CFG.setdefault("globals", {})
 
-def _ensure_globals_structure(cfg: Dict) -> None:
-    """Normaliza claves heredadas a las nuevas llaves planas."""
-    glb = cfg.setdefault("globals", {})
-
-    legacy_fill = glb.pop("water_fill_seconds", None)
-    if isinstance(legacy_fill, dict):
-        glb.setdefault("fill_seconds_ligero", int(legacy_fill.get("ligero", 5)))
-        glb.setdefault("fill_seconds_estandar", int(legacy_fill.get("estandar", 8)))
-        glb.setdefault("fill_seconds_intenso", int(legacy_fill.get("intenso", 12)))
-
-    legacy_dose = glb.pop("chem_dose_seconds", None)
-    if isinstance(legacy_dose, dict):
-        glb.setdefault("chem_seconds_detergente", int(legacy_dose.get("Q1", 4)))
-        glb.setdefault("chem_seconds_quitamanchas", int(legacy_dose.get("Q2", 3)))
-        glb.setdefault("chem_seconds_suavizante", int(legacy_dose.get("Q3", 2)))
-        glb.setdefault("chem_seconds_blanqueador", int(legacy_dose.get("Q4", 2)))
-
-    legacy_drain = glb.pop("drain_seconds", None)
-    if isinstance(legacy_drain, dict):
-        glb.setdefault("drain_seconds_ligero", int(legacy_drain.get("ligero", 20)))
-        glb.setdefault("drain_seconds_estandar", int(legacy_drain.get("estandar", 30)))
-        glb.setdefault("drain_seconds_intenso", int(legacy_drain.get("intenso", 45)))
-
-    legacy_alt = glb.pop("alternancia_motor_s", None)
-    if legacy_alt is not None:
-        try:
-            glb.setdefault("motor_alt_seconds", int(legacy_alt))
-        except Exception:
-            glb.setdefault("motor_alt_seconds", 0)
-
-    glb.setdefault("fill_seconds_ligero", 5)
-    glb.setdefault("fill_seconds_estandar", 8)
-    glb.setdefault("fill_seconds_intenso", 12)
-
-    glb.setdefault("chem_seconds_detergente", 4)
-    glb.setdefault("chem_seconds_quitamanchas", 3)
-    glb.setdefault("chem_seconds_suavizante", 2)
-    glb.setdefault("chem_seconds_blanqueador", 2)
-
-    glb.setdefault("drain_seconds_ligero", 20)
-    glb.setdefault("drain_seconds_estandar", 30)
-    glb.setdefault("drain_seconds_intenso", 45)
-
-    try:
-        glb.setdefault("motor_alt_seconds", int(glb.get("motor_alt_seconds", 0)))
-    except Exception:
-        glb["motor_alt_seconds"] = 0
+CFG = load_config()
+BAUDRATE = int(CFG.get("baudrate", 115200) or 115200)
+PREFERRED_PORT = CFG.get("serial_port")
 
 
-_ensure_globals_structure(CFG)
-
-# ========= Defaults de serial =========
-BAUDRATE: int = int(CFG.get("baudrate", 115200))
-PREFERRED_PORT: Optional[str] = CFG.get("serial_port")
-
-# ========= Puertos bloqueados (Raspberry UART del sistema) =========
-BLOCKED_PORTS = ("/dev/ttyAMA0", "ttyAMA0")
-
-def _is_blocked_port(name: Optional[str]) -> bool:
-    if not name:
+def _is_blocked_port(port: Optional[str]) -> bool:
+    if not port:
         return False
-    return name.endswith(BLOCKED_PORTS[1]) or name == BLOCKED_PORTS[0]
+    return port == BLOCKED_PORTS[0] or port.endswith(BLOCKED_PORTS[1])
 
 
 class SerialConn:
-    """
-    Envoltura simple para pyserial con:
-    - open/cerrar
-    - autoconexión
-    - envío JSON por línea
-    - lista de puertos (filtrada)
-    """
-    def __init__(self, baudrate: int = BAUDRATE, preferred_port: Optional[str] = PREFERRED_PORT):
-        self.baudrate = baudrate
-        self.preferred_port = preferred_port
-        self.port_name: Optional[str] = None
-        self._lock = threading.Lock()
-        self._ser = None  # type: ignore # type: Optional[serial.Serial]
+    """Wrapper mínima sobre pyserial con autoconexión y envío JSON."""
 
-    # ---- utilidades ----
-    def list_ports(self) -> List[str]:
-        ports = []
+    def __init__(self, baudrate: int = BAUDRATE, preferred_port: Optional[str] = PREFERRED_PORT):
+        self.baudrate = int(baudrate or 115200)
+        self.preferred_port = preferred_port
+        self._serial: Optional[Serial] = None
+        self._lock = threading.Lock()
+        self.port_name: Optional[str] = None
+
+    # ------------------------------- utilidades -------------------------------
+    def list_ports(self) -> Iterable[str]:
+        if list_ports is None:
+            return []
         try:
-            if list_ports:
-                ports = [p.device for p in list_ports.comports()]
+            ports = [p.device for p in list_ports.comports()]
         except Exception:
             ports = []
-        # filtra bloqueados
-        ports = [p for p in ports if not _is_blocked_port(p)]
-        return ports
+        return [p for p in ports if not _is_blocked_port(p)]
 
     def is_connected(self) -> bool:
-        try:
-            return bool(self._ser and self._ser.is_open)
-        except Exception:
+        with self._lock:
+            ser = self._serial
+        return bool(ser and ser.is_open)
+
+    # ------------------------------- conexión --------------------------------
+    def connect(self, port: str) -> bool:
+        if _is_blocked_port(port) or Serial is None:
             return False
 
-    # ---- conexión ----
-    def connect(self, port_name: str) -> bool:
-        """Conecta a un puerto específico. Devuelve True/False."""
-        if _is_blocked_port(port_name):
-            self.port_name = None
-            return False
-        if serial is None:
+        try:
+            ser = Serial(
+                port=port,
+                baudrate=self.baudrate,
+                timeout=0,
+                write_timeout=0.2,
+            )
+            ser.reset_input_buffer()
+            ser.reset_output_buffer()
+        except (SerialException, OSError, ValueError):
             return False
 
         with self._lock:
-            try:
-                # Cierra si estaba abierto
-                if self._ser and self._ser.is_open:
-                    try:
-                        self._ser.close()
-                    except Exception:
-                        pass
-                    self._ser = None
-
-                self._ser = serial.Serial(
-                    port=port_name,
-                    baudrate=int(self.baudrate or 115200),
-                    timeout=0.1,
-                    write_timeout=0.2
-                )
-                self.port_name = port_name
-
-                # persiste preferencia
-                self.preferred_port = port_name
-                CFG["serial_port"] = port_name
-                CFG["baudrate"] = int(self.baudrate or 115200)
-                save_config(CFG)
-
-                return True
-            except Exception:
-                self._ser = None
-                self.port_name = None
-                return False
+            if self._serial and self._serial.is_open:
+                try:
+                    self._serial.close()
+                except Exception:
+                    pass
+            self._serial = ser
+            self.port_name = port
+            self.preferred_port = port
+        CFG["serial_port"] = port
+        CFG["baudrate"] = self.baudrate
+        save_config(CFG)
+        return True
 
     def connect_auto(self) -> bool:
-        """Intenta conectar usando preferred_port y luego el resto."""
-        # 1) preferred_port primero (si no está bloqueado)
         if self.preferred_port and not _is_blocked_port(self.preferred_port):
             if self.connect(self.preferred_port):
                 return True
-
-        # 2) otros puertos
-        for p in self.list_ports():
-            if self.connect(p):
+        for port in self.list_ports():
+            if self.connect(port):
                 return True
-
         return False
 
-    def close(self):
+    def close(self) -> None:
         with self._lock:
-            if self._ser:
-                try:
-                    self._ser.close()
-                except Exception:
-                    pass
-                self._ser = None
-                self.port_name = None
+            ser = self._serial
+            self._serial = None
+            self.port_name = None
+        if ser:
+            try:
+                ser.close()
+            except Exception:
+                pass
 
-    # ---- IO ----
-    def send_line(self, line: str) -> bool:
+    # -------------------------------- envío ----------------------------------
+    def send_json(self, payload: dict) -> bool:
         if not self.is_connected():
             return False
         try:
-            data = (line.rstrip("\n") + "\n").encode("utf-8")
-            with self._lock:
-                self._ser.write(data)
+            line = json.dumps(payload, ensure_ascii=False)
+        except (TypeError, ValueError):
+            return False
+        data = (line + "\n").encode("utf-8")
+        with self._lock:
+            ser = self._serial
+        if not ser or not ser.is_open:
+            return False
+        try:
+            ser.write(data)
             return True
-        except Exception:
+        except (SerialException, OSError):
+            self.close()
             return False
 
-    def send_json(self, obj: Dict) -> bool:
-        import json as _json
-        try:
-            line = _json.dumps(obj, ensure_ascii=False)
-        except Exception:
+    # ------------------------------- vigilancia -------------------------------
+    def _alive_touch(self) -> bool:
+        with self._lock:
+            ser = self._serial
+        if not ser or not ser.is_open:
             return False
-        return self.send_line(line)
-
-    def read_line(self, timeout: float = 0.0) -> Optional[str]:
-        """Lee una línea si hay datos; si timeout>0, espera un poco."""
-        if not self.is_connected():
-            return None
-        end_t = time.time() + max(0.0, timeout)
         try:
-            while True:
-                with self._lock:
-                    if self._ser.in_waiting:
-                        raw = self._ser.readline()
-                    else:
-                        raw = b""
-                if raw:
-                    try:
-                        return raw.decode("utf-8", errors="ignore").rstrip("\r\n")
-                    except Exception:
-                        return None
-                if timeout <= 0.0 or time.time() >= end_t:
-                    return None
-                time.sleep(0.01)
-        except Exception:
-            return None
+            _ = ser.in_waiting
+            return True
+        except (SerialException, OSError):
+            self.close()
+            return False
 
 
 class CommWatcher(threading.Thread):
-    """Hilo que vigila la conexión y genera callbacks al cambiar de estado."""
+    """Hilo que vigila el estado de la conexión y reconecta automáticamente."""
 
-    def __init__(self,
-                 serial_conn: SerialConn,
-                 poll_sec: float = 1.0,
-                 on_connect=None,
-                 on_disconnect=None):
+    def __init__(
+        self,
+        serial_conn: SerialConn,
+        poll_sec: float = 0.5,
+        on_connect: Optional[Callable[[str], None]] = None,
+        on_disconnect: Optional[Callable[[], None]] = None,
+        tk_after: Optional[Callable[[int, Callable[[], None]], None]] = None,
+    ) -> None:
         super().__init__(daemon=True)
         self.serial = serial_conn
-        self.poll_sec = max(0.2, float(poll_sec) if poll_sec else 1.0)
-        self._stop = threading.Event()
+        self.poll_sec = max(0.1, float(poll_sec) if poll_sec else 0.5)
         self._on_connect = on_connect
         self._on_disconnect = on_disconnect
-        self._last_state = self.serial.is_connected()
+        self._tk_after = tk_after
+        self._stop = threading.Event()
+        self._last_connected = self.serial.is_connected()
         self._last_port = self.serial.port_name
 
-    def _safe_callback(self, cb, *args):
-        if not cb:
+    # ------------------------------ utilidades --------------------------------
+    def _emit(self, callback: Optional[Callable], *args) -> None:
+        if not callback:
+            return
+        if self._tk_after:
+            try:
+                self._tk_after(0, lambda: callback(*args))
+            except Exception:
+                pass
             return
         try:
-            cb(*args)
+            callback(*args)
         except Exception:
             pass
 
-    def _sleep_slice(self):
-        slice_s = 0.1
-        elapsed = 0.0
-        while elapsed + slice_s <= self.poll_sec:
-            if self._stop.is_set():
-                return
-            time.sleep(slice_s)
-            elapsed += slice_s
-        rem = self.poll_sec - elapsed
-        if rem > 0 and not self._stop.is_set():
-            time.sleep(rem)
+    def _sleep(self) -> None:
+        end = time.time() + self.poll_sec
+        while not self._stop.is_set() and time.time() < end:
+            time.sleep(0.1)
 
-    def run(self):
-        if self._last_state:
-            self._safe_callback(self._on_connect, self.serial.port_name)
+    def _attempt_reconnect(self, available_ports: Iterable[str]) -> bool:
+        ports = list(available_ports)
+        target = self.serial.preferred_port
+        if target and not _is_blocked_port(target):
+            if target not in ports:
+                ports.insert(0, target)
+            else:
+                ports.remove(target)
+                ports.insert(0, target)
+        else:
+            target = None
+        for port in ports:
+            if self.serial.connect(port):
+                return True
+        if not target:
+            for port in self.serial.list_ports():
+                if self.serial.connect(port):
+                    return True
+        return False
+
+    # --------------------------------- hilo -----------------------------------
+    def run(self) -> None:
+        if self._last_connected and self._last_port:
+            self._emit(self._on_connect, self._last_port)
 
         while not self._stop.is_set():
             try:
                 connected = self.serial.is_connected()
-                port = self.serial.port_name
+                current_port = self.serial.port_name
+                available_ports = list(self.serial.list_ports())
+                port_present = current_port in available_ports if current_port else False
+                alive = self.serial._alive_touch() if connected else False
+
+                if connected and (not port_present or not alive):
+                    self.serial.close()
+                    connected = False
+                    current_port = None
 
                 if connected:
-                    if not self._last_state:
-                        self._last_state = True
-                        self._last_port = port
-                        self._safe_callback(self._on_connect, port)
+                    if not self._last_connected:
+                        self._last_connected = True
+                        self._last_port = current_port
+                        if current_port:
+                            self._emit(self._on_connect, current_port)
                 else:
-                    if self._last_state:
-                        self._last_state = False
+                    if self._last_connected:
+                        self._last_connected = False
                         self._last_port = None
-                        self._safe_callback(self._on_disconnect)
+                        self._emit(self._on_disconnect)
 
-                    ok = False
-                    target = self.serial.preferred_port
-                    if target and not _is_blocked_port(target):
-                        ok = self.serial.connect(target)
-                    if not ok:
-                        ok = self.serial.connect_auto()
-
-                    if ok:
-                        self._last_state = True
+                    if self._attempt_reconnect(available_ports):
+                        self._last_connected = True
                         self._last_port = self.serial.port_name
-                        self._safe_callback(self._on_connect, self._last_port)
+                        if self._last_port:
+                            self._emit(self._on_connect, self._last_port)
             except Exception:
-                # En caso de error, marca como desconectado y sigue intentando.
-                if self._last_state:
-                    self._last_state = False
+                if self.serial.is_connected():
+                    self.serial.close()
+                if self._last_connected:
+                    self._last_connected = False
                     self._last_port = None
-                    self._safe_callback(self._on_disconnect)
+                    self._emit(self._on_disconnect)
+            self._sleep()
 
-            self._sleep_slice()
-
-    def stop(self):
+    def stop(self) -> None:
         self._stop.set()
