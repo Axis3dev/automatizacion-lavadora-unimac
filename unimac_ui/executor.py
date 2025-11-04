@@ -342,8 +342,8 @@ class Executor:
         self.hw.drain_open(False)
         self._send_event({"event": "drain", "open": False, "seconds": 0})
         fill_seconds = self._fill_seconds(self._current_level)
-        self.hw.fill(self._current_level)
-        temp_event = self._agua_temp or "fria"
+        temp_event = (self._agua_temp or "fria").strip().lower()
+        self.hw.fill(temp_event, self._current_level)
         self._send_event({"event": "fill", "temp": temp_event, "seconds": fill_seconds})
         if self.controller and hasattr(self.controller, "begin_fill"):
             self.controller.begin_fill(self._current_level, self._agua_temp)

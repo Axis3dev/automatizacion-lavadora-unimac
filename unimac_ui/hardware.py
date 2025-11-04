@@ -44,11 +44,26 @@ class HardwareIO:
         table = self.get_dose_seconds() or {}
         return _safe_int(table.get(ident, 0), 0)
 
-    def fill(self, nivel: Optional[str]):
-        secs = self._fill_seconds_for(nivel)
+    def fill(self, temp: Optional[str], nivel: Optional[str] = None):
+        """Activa la válvula de agua respetando el nivel configurado.
+
+        Mantiene compatibilidad con llamadas heredadas donde el primer
+        parámetro correspondía al nivel en lugar de la temperatura.
+        """
+        water = (temp or "").strip().lower() if temp else None
+        level = nivel
+        if level is None and water not in {None, "fria", "fría", "caliente", "tibia"}:
+            # Compatibilidad con firmas antiguas: fill(nivel)
+            level = water
+            water = None
+
+        secs = self._fill_seconds_for(level)
         self._cancel_timer(self._fill_timer)
         if secs > 0:
-            print(f"[HW] Llenando agua ({nivel or 'estandar'}) durante {secs}s")
+            descr = level or "estandar"
+            if water:
+                descr = f"{descr} / agua {water}"
+            print(f"[HW] Llenando agua ({descr}) durante {secs}s")
 
             def _on_finish():
                 print("[HW] Llenado completado")
@@ -57,7 +72,10 @@ class HardwareIO:
             self._fill_timer.daemon = True
             self._fill_timer.start()
         else:
-            print(f"[HW] Llenando agua ({nivel or 'estandar'})")
+            descr = level or "estandar"
+            if water:
+                descr = f"{descr} / agua {water}"
+            print(f"[HW] Llenando agua ({descr})")
 
     CHEM_LABELS = {
         "Q1": "Detergente",
