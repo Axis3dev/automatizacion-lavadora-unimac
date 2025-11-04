@@ -1,0 +1,9 @@
+{
+  "globals": {
+    "water_fill_seconds": {
+      "ligero": 936,
+      "estandar": 638,
+      "intenso": 399
+    }
+  }
+}

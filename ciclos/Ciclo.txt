@@ -1,0 +1,3 @@
+nombre=Ciclo
+temp_agua=fria
+accion=lavado;duracion=60;nivel=estandar;quimicos=blanqueador,detergente
