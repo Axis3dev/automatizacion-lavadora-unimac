@@ -89,24 +89,34 @@ class SettingsDialog(tk.Toplevel):
 
         # Globals
         glb = self.CFG.get("globals", {})
-        fill_def = glb.get("water_fill_seconds", {"ligero":5,"estandar":8,"intenso":12})
-        self.var_ligero   = tk.StringVar(value=str(int(fill_def.get("ligero",5))))
-        self.var_estandar = tk.StringVar(value=str(int(fill_def.get("estandar",8))))
-        self.var_intenso  = tk.StringVar(value=str(int(fill_def.get("intenso",12))))
+        fill_legacy = glb.get("water_fill_seconds", {}) if isinstance(glb.get("water_fill_seconds", {}), dict) else {}
+        dose_legacy = glb.get("chem_dose_seconds", {}) if isinstance(glb.get("chem_dose_seconds", {}), dict) else {}
+        drain_legacy = glb.get("drain_seconds", {}) if isinstance(glb.get("drain_seconds", {}), dict) else {}
 
-        dose_def = glb.get("chem_dose_seconds", {"Q1":4,"Q2":3,"Q3":2,"Q4":2})
-        self.var_q1 = tk.StringVar(value=str(int(dose_def.get("Q1",4))))
-        self.var_q2 = tk.StringVar(value=str(int(dose_def.get("Q2",3))))
-        self.var_q3 = tk.StringVar(value=str(int(dose_def.get("Q3",2))))
-        self.var_q4 = tk.StringVar(value=str(int(dose_def.get("Q4",2))))
+        def _ival(value, default):
+            try:
+                return int(value)
+            except Exception:
+                return default
 
-        drain_def = glb.get("drain_seconds", {"ligero":20,"estandar":30,"intenso":45})
-        self.var_drain_l = tk.StringVar(value=str(int(drain_def.get("ligero",20))))
-        self.var_drain_e = tk.StringVar(value=str(int(drain_def.get("estandar",30))))
-        self.var_drain_i = tk.StringVar(value=str(int(drain_def.get("intenso",45))))
+        self.var_ligero   = tk.StringVar(value=str(_ival(glb.get("fill_seconds_ligero",   fill_legacy.get("ligero", 5)), 5)))
+        self.var_estandar = tk.StringVar(value=str(_ival(glb.get("fill_seconds_estandar", fill_legacy.get("estandar", 8)), 8)))
+        self.var_intenso  = tk.StringVar(value=str(_ival(glb.get("fill_seconds_intenso",  fill_legacy.get("intenso", 12)), 12)))
 
-        alt_def = int(glb.get("alternancia_motor_s", 0))
-        self.var_alt = tk.StringVar(value=str(alt_def))
+        self.var_q1 = tk.StringVar(value=str(_ival(glb.get("chem_seconds_detergente",  dose_legacy.get("Q1", 4)), 4)))
+        self.var_q2 = tk.StringVar(value=str(_ival(glb.get("chem_seconds_quitamanchas", dose_legacy.get("Q2", 3)), 3)))
+        self.var_q3 = tk.StringVar(value=str(_ival(glb.get("chem_seconds_suavizante",   dose_legacy.get("Q3", 2)), 2)))
+        self.var_q4 = tk.StringVar(value=str(_ival(glb.get("chem_seconds_blanqueador",  dose_legacy.get("Q4", 2)), 2)))
+
+        self.var_drain_l = tk.StringVar(value=str(_ival(glb.get("drain_seconds_ligero",   drain_legacy.get("ligero", 20)), 20)))
+        self.var_drain_e = tk.StringVar(value=str(_ival(glb.get("drain_seconds_estandar", drain_legacy.get("estandar", 30)), 30)))
+        self.var_drain_i = tk.StringVar(value=str(_ival(glb.get("drain_seconds_intenso",  drain_legacy.get("intenso", 45)), 45)))
+
+        try:
+            alt_def = int(glb.get("motor_alt_seconds", glb.get("alternancia_motor_s", 0)) or 0)
+        except Exception:
+            alt_def = 0
+        self.var_alt = tk.StringVar(value=str(max(0, alt_def)))
 
         root = ttk.Frame(self, padding=12); root.pack(fill="both", expand=True)
         main = ttk.Frame(root); main.pack(fill="both", expand=True, pady=(0,8))
@@ -262,19 +272,26 @@ class SettingsDialog(tk.Toplevel):
 
     def _on_save(self):
         fills={}
-        for key,var in (("ligero",self.var_ligero),("estandar",self.var_estandar),("intenso",self.var_intenso)):
+        for key,var in (("fill_seconds_ligero",self.var_ligero),
+                        ("fill_seconds_estandar",self.var_estandar),
+                        ("fill_seconds_intenso",self.var_intenso)):
             try: v=int(var.get() or "0")
             except Exception: v=0
             fills[key]=max(0,v)
 
         doses={}
-        for key,var in (("Q1",self.var_q1),("Q2",self.var_q2),("Q3",self.var_q3),("Q4",self.var_q4)):
+        for key,var in (("chem_seconds_detergente",self.var_q1),
+                        ("chem_seconds_quitamanchas",self.var_q2),
+                        ("chem_seconds_suavizante",self.var_q3),
+                        ("chem_seconds_blanqueador",self.var_q4)):
             try: v=int(var.get() or "0")
             except Exception: v=0
             doses[key]=max(0,v)
 
         drains={}
-        for key,var in (("ligero",self.var_drain_l),("estandar",self.var_drain_e),("intenso",self.var_drain_i)):
+        for key,var in (("drain_seconds_ligero",self.var_drain_l),
+                        ("drain_seconds_estandar",self.var_drain_e),
+                        ("drain_seconds_intenso",self.var_drain_i)):
             try: v=int(var.get() or "0")
             except Exception: v=0
             drains[key]=max(0,v)

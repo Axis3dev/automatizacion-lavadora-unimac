@@ -106,6 +106,33 @@ class Esp32Controller:
         # Cancelar alternancia
         self._cancel_agitate_jobs()
 
+    # ---------- API granular para el ejecutor ----------
+    def begin_fill(self, nivel_agua: Optional[str], agua: Optional[str]):
+        self._out("DRAIN", 1)
+        self._start_fill(nivel_agua, agua)
+
+    def dose(self, hw_ident: str, seconds: int):
+        self._dose(hw_ident, int(max(0, seconds)))
+
+    def motor(self, run: bool, direction: str, speed: str):
+        spd = "low"
+        s = (speed or "").lower()
+        if s == "medio":
+            spd = "med"
+        elif s == "alto":
+            spd = "high"
+        dir_map = "cw" if (direction or "").upper() != "REV" else "ccw"
+        if run:
+            self._vfd(run="on", dir=dir_map, speed=spd)
+        else:
+            self._vfd(run="off")
+
+    def close_drain(self):
+        self._out("DRAIN", 1)
+
+    def spin(self, duracion: int, velocidad: Optional[str]):
+        self._run_spin(max(0, int(duracion or 0)), velocidad or "alto")
+
     # ---------- pasos ----------
     def run_step(self, accion: str, duracion: int,
                  nivel_agua: Optional[str] = None,

@@ -31,7 +31,57 @@ def save_config(cfg: Dict):
 
 CFG: Dict = load_config()
 CFG.setdefault("globals", {})
-CFG["globals"].setdefault("water_fill_seconds", {"ligero": 5, "estandar": 8, "intenso": 12})
+
+def _ensure_globals_structure(cfg: Dict) -> None:
+    """Normaliza claves heredadas a las nuevas llaves planas."""
+    glb = cfg.setdefault("globals", {})
+
+    legacy_fill = glb.pop("water_fill_seconds", None)
+    if isinstance(legacy_fill, dict):
+        glb.setdefault("fill_seconds_ligero", int(legacy_fill.get("ligero", 5)))
+        glb.setdefault("fill_seconds_estandar", int(legacy_fill.get("estandar", 8)))
+        glb.setdefault("fill_seconds_intenso", int(legacy_fill.get("intenso", 12)))
+
+    legacy_dose = glb.pop("chem_dose_seconds", None)
+    if isinstance(legacy_dose, dict):
+        glb.setdefault("chem_seconds_detergente", int(legacy_dose.get("Q1", 4)))
+        glb.setdefault("chem_seconds_quitamanchas", int(legacy_dose.get("Q2", 3)))
+        glb.setdefault("chem_seconds_suavizante", int(legacy_dose.get("Q3", 2)))
+        glb.setdefault("chem_seconds_blanqueador", int(legacy_dose.get("Q4", 2)))
+
+    legacy_drain = glb.pop("drain_seconds", None)
+    if isinstance(legacy_drain, dict):
+        glb.setdefault("drain_seconds_ligero", int(legacy_drain.get("ligero", 20)))
+        glb.setdefault("drain_seconds_estandar", int(legacy_drain.get("estandar", 30)))
+        glb.setdefault("drain_seconds_intenso", int(legacy_drain.get("intenso", 45)))
+
+    legacy_alt = glb.pop("alternancia_motor_s", None)
+    if legacy_alt is not None:
+        try:
+            glb.setdefault("motor_alt_seconds", int(legacy_alt))
+        except Exception:
+            glb.setdefault("motor_alt_seconds", 0)
+
+    glb.setdefault("fill_seconds_ligero", 5)
+    glb.setdefault("fill_seconds_estandar", 8)
+    glb.setdefault("fill_seconds_intenso", 12)
+
+    glb.setdefault("chem_seconds_detergente", 4)
+    glb.setdefault("chem_seconds_quitamanchas", 3)
+    glb.setdefault("chem_seconds_suavizante", 2)
+    glb.setdefault("chem_seconds_blanqueador", 2)
+
+    glb.setdefault("drain_seconds_ligero", 20)
+    glb.setdefault("drain_seconds_estandar", 30)
+    glb.setdefault("drain_seconds_intenso", 45)
+
+    try:
+        glb.setdefault("motor_alt_seconds", int(glb.get("motor_alt_seconds", 0)))
+    except Exception:
+        glb["motor_alt_seconds"] = 0
+
+
+_ensure_globals_structure(CFG)
 
 # ========= Defaults de serial =========
 BAUDRATE: int = int(CFG.get("baudrate", 115200))
