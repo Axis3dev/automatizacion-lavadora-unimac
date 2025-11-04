@@ -61,7 +61,13 @@ class WasherUI(tk.Tk):
 
         # Serial
         self.serial = SerialConn(baudrate=BAUDRATE, preferred_port=PREFERRED_PORT)
-        self.comm_watcher = CommWatcher(self.serial, poll_sec=0.5)
+        self._comm_last_state = self.serial.is_connected()
+        self.comm_watcher = CommWatcher(
+            self.serial,
+            poll_sec=0.5,
+            on_connect=self._on_comm_connected,
+            on_disconnect=self._on_comm_disconnected,
+        )
         self.comm_watcher.start()
 
         self.CFG = CFG
@@ -101,6 +107,8 @@ class WasherUI(tk.Tk):
         self._scroll_job = None
         self.current_cycle_total = 0
         self.current_step_name = tk.StringVar(value="—")
+        self._latched_cycle: Optional[Cycle] = None
+        self._latched_total_steps: int = 0
 
         self._build_ui()
         self._load_cycle_list()
@@ -125,14 +133,18 @@ class WasherUI(tk.Tk):
         root = ttk.Frame(self, padding=12); root.pack(fill="both", expand=True)
 
         bar = ttk.Frame(root); bar.pack(fill="x", pady=(0,8))
-        ttk.Button(bar, text="✎  Editar Ciclo", style="Top.TButton",
-                   command=self._select_or_edit).pack(side="left", padx=(0,8))
-        ttk.Button(bar, text="+  Crear Ciclo", style="Top.TButton",
-                   command=self._create_cycle_dialog).pack(side="left", padx=(0,8))
-        ttk.Button(bar, text="X  Eliminar", style="Top.TButton",
-                   command=self._delete_selected_cycle).pack(side="left", padx=(0,8))
-        ttk.Button(bar, text="⚙  Configuración", style="Top.TButton",
-                   command=self._open_settings).pack(side="right")
+        self.btn_edit = ttk.Button(bar, text="✎  Editar Ciclo", style="Top.TButton",
+                                   command=self._select_or_edit)
+        self.btn_edit.pack(side="left", padx=(0,8))
+        self.btn_create = ttk.Button(bar, text="+  Crear Ciclo", style="Top.TButton",
+                                     command=self._create_cycle_dialog)
+        self.btn_create.pack(side="left", padx=(0,8))
+        self.btn_delete = ttk.Button(bar, text="X  Eliminar", style="Top.TButton",
+                                     command=self._delete_selected_cycle)
+        self.btn_delete.pack(side="left", padx=(0,8))
+        self.btn_settings = ttk.Button(bar, text="⚙  Configuración", style="Top.TButton",
+                                       command=self._open_settings)
+        self.btn_settings.pack(side="right")
 
         body = ttk.Frame(root); body.pack(fill="both", expand=True)
 
@@ -302,6 +314,9 @@ class WasherUI(tk.Tk):
         for f in list_cycles(): self.listbox.insert("end", f[:-4].replace("_"," "))
 
     def _on_list_select(self):
+        if self.executor.state in (Executor.RUNNING, Executor.PAUSED, Executor.HOLD):
+            return
+
         idx = self.listbox.curselection()
         if not idx: self.selected_cycle=None; self._render_details(None); return
         path = os.path.join(CICLOS_DIR, list_cycles()[idx[0]])
@@ -321,7 +336,7 @@ class WasherUI(tk.Tk):
 
     # estado/progreso
     def _update_status_text(self, text: str):
-        if not (self.selected_cycle and self.executor.state in (Executor.RUNNING, Executor.PAUSED, Executor.HOLD)):
+        if not (self._latched_cycle and self.executor.state in (Executor.RUNNING, Executor.PAUSED, Executor.HOLD)):
             self.status.config(text=f"Estado actual: {text}")
 
     def _fmt_secs(self, s:int)->str:
@@ -335,8 +350,12 @@ class WasherUI(tk.Tk):
         self.pb_var.set(pct); self.pb_pct.config(text=f"{pct}%")
 
     def _on_tick(self, step_idx:int, step_remaining:int, total_remaining:int):
-        if self.selected_cycle and self.executor.state in (Executor.RUNNING, Executor.PAUSED, Executor.HOLD):
-            step_n = step_idx + 1; total = len(self.selected_cycle.pasos)
+        if self.executor.state in (Executor.RUNNING, Executor.PAUSED, Executor.HOLD):
+            cycle = self._latched_cycle or self.selected_cycle
+            total = self._latched_total_steps or (len(cycle.pasos) if cycle else 0)
+            step_n = step_idx + 1
+            if total <= 0:
+                total = max(1, step_n)
             if self.executor.state == Executor.PAUSED:
                 label_state = "Pausado"
             elif getattr(self.executor, "in_drain_pause", False):
@@ -347,10 +366,11 @@ class WasherUI(tk.Tk):
         self._update_progress(total_remaining)
 
     def _on_step_change(self, i:int):
-        if not self.selected_cycle: return
-        try: s = self.selected_cycle.pasos[i]
+        cycle = self._latched_cycle or self.selected_cycle
+        if not cycle: return
+        try: s = cycle.pasos[i]
         except IndexError: return
-        self.current_cycle_total = self.selected_cycle.total_duracion
+        self.current_cycle_total = cycle.total_duracion
         self.current_step_name.set(f"Paso actual: {s.accion.capitalize()}")
 
     def _on_finish(self):
@@ -359,6 +379,9 @@ class WasherUI(tk.Tk):
         self.btn_run.config(state="normal")
         self.pb_var.set(100); self.pb_pct.config(text="100%")
         self.current_step_name.set("—")
+        self._latched_cycle = None
+        self._latched_total_steps = 0
+        self._set_run_ui_lock(False)
 
     # ejecución
     def _start_execution(self):
@@ -366,9 +389,12 @@ class WasherUI(tk.Tk):
             self.toast("Ya hay un ciclo en ejecución."); return
         if not self.selected_cycle:
             self.toast("Selecciona un ciclo primero."); return
+        self._latched_cycle = self.selected_cycle
+        self._latched_total_steps = len(self.selected_cycle.pasos)
         self.executor.load_cycle(self.selected_cycle)
         self.current_cycle_total = self.selected_cycle.total_duracion
         self.executor.start()
+        self._set_run_ui_lock(True)
         self._update_progress(self.executor.total_remaining)
         self.btn_run.config(state="disabled")
         self.btn_pause.config(state="normal", text="⏸  Pausar")
@@ -387,6 +413,9 @@ class WasherUI(tk.Tk):
         self.btn_stop.config(state="disabled")
         self.btn_run.config(state="normal")
         self.pb_var.set(0); self.pb_pct.config(text="0%"); self.current_step_name.set("—")
+        self._latched_cycle = None
+        self._latched_total_steps = 0
+        self._set_run_ui_lock(False)
 
     # settings
     def _open_settings(self):
@@ -470,7 +499,13 @@ class WasherUI(tk.Tk):
     def _after_reconnect(self, busy):
         try: busy.destroy()
         except Exception: pass
-        self.comm_watcher = CommWatcher(self.serial, poll_sec=0.5)
+        self._comm_last_state = self.serial.is_connected()
+        self.comm_watcher = CommWatcher(
+            self.serial,
+            poll_sec=0.5,
+            on_connect=self._on_comm_connected,
+            on_disconnect=self._on_comm_disconnected,
+        )
         self.comm_watcher.start()
         self._update_comm_panel_now()
         self.toast("Conexión actualizada.")
@@ -479,6 +514,43 @@ class WasherUI(tk.Tk):
     def _loop_logic(self):
         self.executor.tick()
         self.after(self.TICK_MS, self._loop_logic)
+
+    def _set_run_ui_lock(self, locked: bool):
+        state = "disabled" if locked else "normal"
+        try:
+            self.listbox.configure(state=state)
+        except Exception:
+            pass
+        for btn in (getattr(self, "btn_edit", None),
+                    getattr(self, "btn_create", None),
+                    getattr(self, "btn_delete", None),
+                    getattr(self, "btn_settings", None)):
+            if btn:
+                try:
+                    btn.configure(state=state)
+                except Exception:
+                    pass
+
+    def _on_comm_connected(self, port: Optional[str]):
+        def _cb():
+            first = not self._comm_last_state
+            self._comm_last_state = True
+            self._update_comm_panel_now()
+            if first:
+                if port:
+                    self.toast(f"Conectado a {port}")
+                else:
+                    self.toast("Dispositivo conectado")
+        self.after(0, _cb)
+
+    def _on_comm_disconnected(self):
+        def _cb():
+            was_connected = self._comm_last_state
+            self._comm_last_state = False
+            self._update_comm_panel_now()
+            if was_connected:
+                self.toast("Dispositivo desconectado")
+        self.after(0, _cb)
 
     def _on_close(self):
         try:

@@ -237,28 +237,81 @@ class SerialConn:
 
 
 class CommWatcher(threading.Thread):
-    """
-    Hilo que vigila la conexión y reintenta automáticamente.
-    """
-    def __init__(self, serial_conn: SerialConn, poll_sec: float = 1.0):
+    """Hilo que vigila la conexión y genera callbacks al cambiar de estado."""
+
+    def __init__(self,
+                 serial_conn: SerialConn,
+                 poll_sec: float = 1.0,
+                 on_connect=None,
+                 on_disconnect=None):
         super().__init__(daemon=True)
         self.serial = serial_conn
-        self.poll_sec = poll_sec
+        self.poll_sec = max(0.2, float(poll_sec) if poll_sec else 1.0)
         self._stop = threading.Event()
+        self._on_connect = on_connect
+        self._on_disconnect = on_disconnect
+        self._last_state = self.serial.is_connected()
+        self._last_port = self.serial.port_name
+
+    def _safe_callback(self, cb, *args):
+        if not cb:
+            return
+        try:
+            cb(*args)
+        except Exception:
+            pass
+
+    def _sleep_slice(self):
+        slice_s = 0.1
+        elapsed = 0.0
+        while elapsed + slice_s <= self.poll_sec:
+            if self._stop.is_set():
+                return
+            time.sleep(slice_s)
+            elapsed += slice_s
+        rem = self.poll_sec - elapsed
+        if rem > 0 and not self._stop.is_set():
+            time.sleep(rem)
 
     def run(self):
+        if self._last_state:
+            self._safe_callback(self._on_connect, self.serial.port_name)
+
         while not self._stop.is_set():
             try:
-                if not self.serial.is_connected():
-                    # Evitar puertos bloqueados en auto
-                    self.serial.connect_auto()
+                connected = self.serial.is_connected()
+                port = self.serial.port_name
+
+                if connected:
+                    if not self._last_state:
+                        self._last_state = True
+                        self._last_port = port
+                        self._safe_callback(self._on_connect, port)
+                else:
+                    if self._last_state:
+                        self._last_state = False
+                        self._last_port = None
+                        self._safe_callback(self._on_disconnect)
+
+                    ok = False
+                    target = self.serial.preferred_port
+                    if target and not _is_blocked_port(target):
+                        ok = self.serial.connect(target)
+                    if not ok:
+                        ok = self.serial.connect_auto()
+
+                    if ok:
+                        self._last_state = True
+                        self._last_port = self.serial.port_name
+                        self._safe_callback(self._on_connect, self._last_port)
             except Exception:
-                pass
-            # pausa
-            for _ in range(int(self.poll_sec * 10)):
-                if self._stop.is_set():
-                    break
-                time.sleep(0.1)
+                # En caso de error, marca como desconectado y sigue intentando.
+                if self._last_state:
+                    self._last_state = False
+                    self._last_port = None
+                    self._safe_callback(self._on_disconnect)
+
+            self._sleep_slice()
 
     def stop(self):
         self._stop.set()
