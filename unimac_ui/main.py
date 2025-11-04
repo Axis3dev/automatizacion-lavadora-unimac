@@ -102,6 +102,36 @@ class WasherUI(tk.Tk):
         self.executor.ui_send_event = lambda ev, **kw: (
             self._send_speed(kw.get("valor")) if ev == "speed" else self.serial.send_json({"event": ev, **kw})
         )
+        self.executor.serial = self.serial
+        globals_cfg = self.CFG.get("globals", {}) if isinstance(self.CFG, dict) else {}
+
+        def _cfg_int(value, default):
+            try:
+                return int(value)
+            except Exception:
+                return default
+
+        fill_defaults = globals_cfg.get("water_fill_seconds", {}) if isinstance(globals_cfg.get("water_fill_seconds"), dict) else {}
+        self.executor.cfg_fill = {
+            "ligero": _cfg_int(globals_cfg.get("fill_seconds_ligero", fill_defaults.get("ligero", 5)), 5),
+            "estandar": _cfg_int(globals_cfg.get("fill_seconds_estandar", fill_defaults.get("estandar", 8)), 8),
+            "intenso": _cfg_int(globals_cfg.get("fill_seconds_intenso", fill_defaults.get("intenso", 12)), 12),
+        }
+
+        chem_defaults = globals_cfg.get("chem_dose_seconds", {}) if isinstance(globals_cfg.get("chem_dose_seconds"), dict) else {}
+        self.executor.cfg_chems = {
+            "detergente": _cfg_int(globals_cfg.get("chem_seconds_detergente", chem_defaults.get("Q1", 5)), 5),
+            "quitamanchas": _cfg_int(globals_cfg.get("chem_seconds_quitamanchas", chem_defaults.get("Q2", 5)), 5),
+            "suavizante": _cfg_int(globals_cfg.get("chem_seconds_suavizante", chem_defaults.get("Q3", 5)), 5),
+            "blanqueador": _cfg_int(globals_cfg.get("chem_seconds_blanqueador", chem_defaults.get("Q4", 5)), 5),
+        }
+
+        alt_default = globals_cfg.get("alternancia_motor_s", globals_cfg.get("motor_alt_seconds", 0))
+        pause_default = globals_cfg.get("motor_pause_seconds", 0)
+        self.executor.cfg_motor = {
+            "alt_every_s": _cfg_int(globals_cfg.get("motor_alt_seconds", alt_default), 0),
+            "alt_pause_s": _cfg_int(globals_cfg.get("motor_pause_seconds", pause_default), 0),
+        }
 
         # Estado UI
         self._settings_win = None

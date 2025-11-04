@@ -98,8 +98,12 @@ class Executor:
         self.in_drain_pause = False
         self._drain_profile = None
         self._drain_label = None
-        self.ui_send_event: Optional[Callable[..., None]] = None
+        self.ui_send_event = getattr(self, "ui_send_event", None)
         self.current_speed: Optional[str] = None
+        self.serial = None
+        self.cfg_fill: Dict[str, int] = {}
+        self.cfg_chems: Dict[str, int] = {}
+        self.cfg_motor: Dict[str, int] = {}
 
     # ---------- utilidades de configuración ----------
     @staticmethod
@@ -110,13 +114,26 @@ class Executor:
             return default
 
     def _fill_seconds(self, level: Optional[str]) -> int:
-        table = self._get_fill_seconds() or {}
+        table = getattr(self, "cfg_fill", None) or {}
+        if not table:
+            table = self._get_fill_seconds() or {}
         key = (level or "estandar").strip().lower()
         return self._safe_int(table.get(key, table.get("estandar", 8)), 8)
 
     def _chem_seconds(self, ident: str) -> int:
-        table = self._get_chem_seconds() or {}
-        return self._safe_int(table.get(ident, 0), 0)
+        table = getattr(self, "cfg_chems", None) or {}
+        if not table:
+            table = self._get_chem_seconds() or {}
+        value = table.get(ident)
+        if value is None and ident in ("Q1", "Q2", "Q3", "Q4"):
+            mapping = {
+                "Q1": table.get("detergente"),
+                "Q2": table.get("quitamanchas"),
+                "Q3": table.get("suavizante"),
+                "Q4": table.get("blanqueador"),
+            }
+            value = mapping.get(ident)
+        return self._safe_int(0 if value is None else value, 0)
 
     def _drain_seconds(self, level: Optional[str]) -> int:
         table = self._get_drain_seconds() or {}
@@ -124,9 +141,15 @@ class Executor:
         return self._safe_int(table.get(key, table.get("estandar", 30)), 30)
 
     def _motor_alt_seconds(self) -> int:
+        cfg_motor = getattr(self, "cfg_motor", None) or {}
+        if cfg_motor and "alt_every_s" in cfg_motor:
+            return max(0, self._safe_int(cfg_motor.get("alt_every_s", 0), 0))
         return max(0, self._safe_int(self._get_motor_alt_seconds() or 0, 0))
 
     def _motor_pause_seconds(self) -> int:
+        cfg_motor = getattr(self, "cfg_motor", None) or {}
+        if cfg_motor and "alt_pause_s" in cfg_motor:
+            return max(0, self._safe_int(cfg_motor.get("alt_pause_s", 0), 0))
         getter = getattr(self, "_get_motor_pause_seconds", None)
         try:
             value = getter() if getter else 0
@@ -244,6 +267,7 @@ class Executor:
         self._set_motor(False)
         self.hw.stop_all()
         self.hw.drain_open(True)
+        self._send({"cmd": "drain", "open": True})
         if self.controller and hasattr(self.controller, "cancel_all"):
             self.controller.cancel_all()
         self._send_event({"event": "stop"})
@@ -254,6 +278,8 @@ class Executor:
         self.state = Executor.IDLE
         self._set_motor(False)
         self.hw.stop_all()
+        self.hw.drain_open(True)
+        self._send({"cmd": "drain", "open": True})
         if self.controller and hasattr(self.controller, "finish_cycle"):
             self.controller.finish_cycle()
         self._send_event({"event": "finish"})
@@ -321,6 +347,7 @@ class Executor:
 
         if self._drain_remaining <= 0:
             self.hw.drain_open(False)
+            self._send({"cmd": "drain", "open": False})
             payload = {"event": "drain", "open": False}
             if self._drain_profile:
                 payload["profile"] = self._drain_profile
@@ -345,6 +372,14 @@ class Executor:
         self._send_event({"event": "emergency"})
         self.cb.on_status("Paro de emergencia")
         self.current_speed = None
+
+    def _send(self, payload: Dict) -> None:
+        serial = getattr(self, "serial", None)
+        if serial and hasattr(serial, "send_json"):
+            try:
+                serial.send_json(payload)
+            except Exception:
+                pass
 
     def _emit_start_event(self):
         total = self._safe_int(getattr(self.cycle, "total_duracion", 0), 0)
@@ -404,10 +439,22 @@ class Executor:
     def _start_water_step(self, step):
         print(f"[EXEC] Iniciando paso de agua: {self._current_action}")
         self.hw.drain_open(False)
-        self._send_event({"event": "drain", "open": False, "seconds": 0})
+        self._send({"cmd": "drain", "open": False})
+        payload = {"event": "drain", "open": False, "seconds": 0}
+        if self._drain_profile:
+            payload["profile"] = self._drain_profile
+        if self._drain_label:
+            payload["label"] = self._drain_label
+        self._send_event(payload)
         fill_seconds = self._fill_seconds(self._current_level)
         temp_event = (self._agua_temp or "fria").strip().lower()
         self.hw.fill(temp_event, self._current_level)
+        self._send({
+            "cmd": "fill",
+            "temp": temp_event,
+            "nivel": self._current_level,
+            "t_s": fill_seconds,
+        })
         self._send_event({"event": "fill", "temp": temp_event, "seconds": fill_seconds})
         if self.controller and hasattr(self.controller, "begin_fill"):
             self.controller.begin_fill(self._current_level, self._agua_temp)
@@ -419,7 +466,10 @@ class Executor:
                 continue
             hw_ident = self._chem_hw_ident(ident)
             secs = self._chem_seconds(hw_ident)
+            if secs <= 0:
+                continue
             self.hw.add_chemical(chem)
+            self._send({"cmd": "chem", "id": ident, "t_s": secs})
             self._send_event({"event": "chem", "id": ident, "seconds": secs})
             if self.controller and hasattr(self.controller, "dose"):
                 self.controller.dose(hw_ident, secs)
@@ -429,6 +479,7 @@ class Executor:
     def _start_spin_step(self, step):
         print(f"[EXEC] Iniciando centrifugado")
         self.hw.drain_open(True)
+        self._send({"cmd": "drain", "open": True})
         self._send_event({"event": "drain", "open": True, "seconds": self.step_remaining})
         speed = self._apply_speed_for_step(step)
         self.hw.spin(speed)
@@ -438,7 +489,9 @@ class Executor:
 
     def _start_drain_step(self, step):
         print(f"[EXEC] Iniciando drenaje explícito")
+        self._set_motor(False)
         self.hw.drain_open(True)
+        self._send({"cmd": "drain", "open": True})
         self._send_event({"event": "drain", "open": True, "seconds": self.step_remaining})
         if self.controller and hasattr(self.controller, "run_drain"):
             self.controller.run_drain(self.step_remaining)
@@ -450,6 +503,7 @@ class Executor:
         self._motor_speed = normalized
         if normalized != self.current_speed:
             self.current_speed = normalized
+            self._send({"cmd": "vfd_speed", "level": normalized})
             dispatcher = getattr(self, "ui_send_event", None)
             if callable(dispatcher):
                 dispatcher("speed", valor=normalized)
@@ -478,6 +532,7 @@ class Executor:
                 self.in_drain_pause = True
                 self.cb.on_status("Drenando…")
                 self.hw.drain_open(True)
+                self._send({"cmd": "drain", "open": True})
                 profile, label = self._drain_profile_info(self._current_level)
                 self._drain_profile = profile
                 self._drain_label = label
@@ -520,8 +575,11 @@ class Executor:
         self._motor_running = run
         if run:
             event = "motor_fwd" if self._motor_dir == "FWD" else "motor_rev"
+            cmd_dir = "FWD" if self._motor_dir == "FWD" else "REV"
         else:
             event = "motor_off"
+            cmd_dir = "STOP"
+        self._send({"cmd": "motor", "dir": cmd_dir})
         self._send_event({"event": event})
         if self.controller and hasattr(self.controller, "motor"):
             self.controller.motor(run=run, direction=self._motor_dir, speed=self._motor_speed)
@@ -572,6 +630,7 @@ class Executor:
     def on_serial_reconnected(self):
         if not self.current_speed:
             return
+        self._send({"cmd": "vfd_speed", "level": self.current_speed})
         dispatcher = getattr(self, "ui_send_event", None)
         if callable(dispatcher):
             dispatcher("speed", valor=self.current_speed)

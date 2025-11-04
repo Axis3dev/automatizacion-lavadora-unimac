@@ -127,22 +127,28 @@ class SerialConn:
     # -------------------------------- envío ----------------------------------
     def send_json(self, payload: dict) -> bool:
         if not self.is_connected():
+            print("[SER] drop send_json: not connected")
             return False
         try:
-            line = json.dumps(payload, ensure_ascii=False)
+            line = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
         except (TypeError, ValueError):
             return False
         data = (line + "\n").encode("utf-8")
         with self._lock:
             ser = self._serial
         if not ser or not ser.is_open:
+            print("[SER] drop send_json: port closed")
             return False
         try:
-            ser.write(data)
-            return True
-        except (SerialException, OSError):
+            with self._lock:
+                ser.write(data)
+                ser.flush()
+        except (SerialException, OSError) as exc:
+            print(f"[SER] write error: {exc}")
             self.close()
             return False
+        print(f"[SER→ESP] {line}")
+        return True
 
     # ------------------------------- vigilancia -------------------------------
     def _alive_touch(self) -> bool:
