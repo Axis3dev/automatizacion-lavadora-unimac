@@ -1,0 +1,7 @@
+nombre=nuevooooo
+temp_agua=fria
+accion=prelavado;duracion=60;nivel=estandar;quimicos=detergente,quitamanchas
+accion=lavado;duracion=60;nivel=ligero;quimicos=quitamanchas,detergente
+accion=enjuague;duracion=60;nivel=estandar
+accion=centrifugado;duracion=60;velocidad=medio
+accion=drenaje;duracion=60

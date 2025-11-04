@@ -1,0 +1,23 @@
+{
+  "globals": {
+    "water_fill_seconds": {
+      "ligero": 10,
+      "estandar": 8,
+      "intenso": 12
+    },
+    "chem_dose_seconds": {
+      "Q1": 5,
+      "Q2": 5,
+      "Q3": 5,
+      "Q4": 5
+    },
+    "drain_seconds": {
+      "ligero": 20,
+      "estandar": 30,
+      "intenso": 45
+    },
+    "alternancia_motor_s": 5
+  },
+  "serial_port": "COM3",
+  "baudrate": 115200
+}

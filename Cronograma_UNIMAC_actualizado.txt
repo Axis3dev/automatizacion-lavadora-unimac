@@ -1,0 +1,68 @@
+📅 Cronograma de Automatización UNIMAC (actualizado)
+Fecha: 16 Sep 2025
+
+🔹 Fase 1 – Preparación del Proyecto
+- ✅ Definir la arquitectura del sistema (Raspberry → GUI + lógica | ESP32 → I/O)
+- ✅ Estructura de paquetes/módulos (unimac_ui: main, editor_v2, settings, models, storage, executor, hardware, serialconn, dialogs, keyboard)
+- ✅ Gestor de ciclos .txt: crear, listar, eliminar, guardar
+- ✅ Formato estándar de archivos .txt (solo parámetros)
+- ✅ Modelos con @dataclass (Step, Cycle)
+- ✅ Parser/serializer .txt
+Estado Fase 1: 100%
+
+🔹 Fase 2 – Comunicación Serial
+- ✅ SerialConn (JSON) + CommWatcher en hilo (monitoreo/reconexión)
+- ✅ Configuración: Actualizar/Conectar/Guardar (sin congelar UI con BusyDialog)
+- ✅ Envío de eventos a ESP32: start/pause/resume/step/finish
+- ✅ Pruebas PC ↔ ESP32 y Raspberry (resuelto freeze al cambiar puerto)
+Estado Fase 2: 100%
+
+🔹 Fase 3 – Ejecución de Ciclos
+- ✅ executor.py con estados RUNNING/PAUSED/STOPPED y tick()
+- ✅ Integración parámetros → ejecución → comandos a ESP32 por paso
+- ✅ Paro seguro: stop() apaga actuadores + drena
+- ⬜ Conectar sensores reales a HardwareIO (emergencia/succión/puerta) y validar
+- ⬜ (Opc) threading.Event dedicado para emergencia si se requiere
+Estado Fase 3: ~80%
+
+🔹 Fase 4 – GUI (Tkinter en Raspberry)
+- ✅ GUI principal fullscreen: Editar, Crear, Eliminar, Configuración
+- ✅ Ejecutar / Pausar / Detener desde GUI
+- ✅ Contador/estado, barra de progreso y nombre del paso
+- ✅ Panel de Comunicación (LED, puerto, estado)
+- ✅ Touch UX: teclados embebidos on-demand (alfanumérico/numérico) con Entry objetivo persistente
+- ✅ Editor táctil v2 sin barra superior: nombre grande, flechas a todo el alto, botonera inferior (+Paso/Cancelar/Guardar)
+- ✅ Químicos/agua/velocidad con tamaños ajustados para 1280×720
+- ✅ Toasts auto-cerrables y bloqueo de ventanas duplicadas
+Estado Fase 4: 100%
+
+🔹 Fase 5 – Integración Completa (campo)
+- ✅ Prueba en Raspberry con conexión serial real
+- ⬜ Validar sensores reales (nivel/succión, puerta, emergencia)
+- ⬜ Validar actuadores reales (válvulas/bomba/motor)
+- ⬜ Calibrar tiempos y rendimiento bajo carga
+Estado Fase 5: ~30%
+
+🔹 Fase 6 – Extras / Mejoras
+- ⬜ Logs rotativos por ejecución (eventos/errores/reconexiones)
+- ⬜ Sistema de usuarios/permisos en GUI
+- ⬜ Exportar/Importar ciclos (USB/red)
+- ⬜ OTA para ESP32
+- ⬜ Arranque automático (systemd) + requirements.txt
+Estado Fase 6: 0%
+
+📊 Resumen
+- Fase 1: 100%
+- Fase 2: 100%
+- Fase 3: ~80%
+- Fase 4: 100%
+- Fase 5: ~30%
+- Fase 6: 0%
+Avance total estimado: ~68%
+
+🎯 Próximos pasos
+1) Cablear sensores/actuadores reales y mapear I/O en hardware.py (o hardware_rpi.py).
+2) Activar interlocks en Executor.tick() usando is_emergency_pressed() / has_suction().
+3) Añadir logging (RotatingFileHandler) y opción “Ver registro” en Configuración (opcional).
+4) Crear servicio systemd para auto-inicio en Raspberry y requirements.txt.
+5) Sesión de calibración (llenado/drenaje/dosificación por paso) y piloto completo.
