@@ -126,6 +126,8 @@ class Executor:
             # Llenado + (opcional) químico, sin giro fuerte (la GUI/ESP32 hacen lo suyo)
             # El modelo de datos usa 'nivel_agua' para describir el nivel; usar eso.
             self.hw.fill(getattr(step, 'nivel_agua', None))
+            for chem in getattr(step, 'quimicos', []) or []:
+                self.hw.add_chemical(chem)
         elif acc in ("centrifugado", "spin"):
             self.hw.drain_open(True)
             self.hw.spin(step.velocidad)

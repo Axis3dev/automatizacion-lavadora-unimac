@@ -6,9 +6,28 @@ Control de ESP32 (orquestador de comandos).
 - Drenaje entre pasos lo controla main; aquí NO se abre al final de pasos con agua.
 """
 
+import unicodedata
 from typing import Callable, Optional, List, Dict
 
+
+def _normalize(text: str) -> str:
+    text = unicodedata.normalize("NFKD", text or "")
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    return text.replace(" ", "").replace("-", "").upper()
+
 class Esp32Controller:
+    CHEM_ALIASES = {
+        "Q1": "Q1",
+        "Q2": "Q2",
+        "Q3": "Q3",
+        "Q4": "Q4",
+        "DETERGENTE": "Q1",
+        "QUITAMANCHAS": "Q2",
+        "QUITAMANCHA": "Q2",
+        "SUAVIZANTE": "Q3",
+        "BLANQUEADOR": "Q4",
+        "CLORO": "Q4",
+    }
     def __init__(self,
                  after: Callable[[int, Callable], None],
                  send: Callable[[Dict], None],
@@ -108,7 +127,7 @@ class Esp32Controller:
         # Dosificación con segundos reales
         doses = self.get_dose_seconds()
         for q in quimicos:
-            ident = str(q).upper()
+            ident = self._normalize_chem(q)
             if ident in ("Q1", "Q2", "Q3", "Q4"):
                 self._dose(ident, int(doses.get(ident, 0)))
 
@@ -186,3 +205,9 @@ class Esp32Controller:
         # Cerrar drenaje (NA) para próximo llenado
         self._out("DRAIN", 1)
         self._beep(80)
+
+    def _normalize_chem(self, ident: str) -> Optional[str]:
+        if ident is None:
+            return None
+        key = _normalize(str(ident))
+        return self.CHEM_ALIASES.get(key)
