@@ -157,6 +157,9 @@ void waterStop() {
 
 void startFill(const char *temp, uint32_t durationMs) {
   waterStop();
+  if (durationMs == 0) {
+    return;
+  }
   drainSet(false);  // close during fill
   if (strcmp(temp, "fria") == 0) {
     digitalWrite(REL_WATER_FRIA, HIGH);
@@ -195,6 +198,10 @@ void buzzerOff() {
   buzzerActive = false;
 }
 
+void doorLock(bool lock) {
+  digitalWrite(REL_DOOR_LOCK, lock ? HIGH : LOW);
+}
+
 void allSafeOff() {
   motorStop();
   speedNone();
@@ -208,6 +215,16 @@ void allSafeOff() {
 }
 
 // ====== COMMAND HANDLERS ======
+void handleDoor(JsonObject obj) {
+  bool lock = obj.containsKey("lock") ? obj["lock"].as<bool>() : false;
+  doorLock(lock);
+
+  StaticJsonDocument<128> ack;
+  ack["ack"] = "door";
+  ack["lock"] = lock;
+  sendJson(ack);
+}
+
 void handleVfdSpeed(JsonObject obj) {
   String level = obj["level"] | "medio";
   level.toLowerCase();
@@ -256,8 +273,14 @@ void handleDrain(JsonObject obj) {
   if (obj.containsKey("nivel")) {
     ack["nivel"] = obj["nivel"].as<const char *>();
   }
+  if (obj.containsKey("profile")) {
+    ack["profile"] = obj["profile"].as<const char *>();
+  }
+  if (obj.containsKey("label")) {
+    ack["label"] = obj["label"].as<const char *>();
+  }
   if (durationMs > 0) {
-    ack["t_ms"] = durationMs;
+    ack["seconds"] = durationMs / 1000.0;
   }
   sendJson(ack);
 }
@@ -294,7 +317,11 @@ void handleChem(JsonObject obj) {
   StaticJsonDocument<160> ack;
   ack["ack"] = "chem";
   ack["id"] = id;
-  ack["t_ms"] = durationMs;
+  if (durationMs > 0) {
+    ack["seconds"] = durationMs / 1000.0;
+  } else {
+    ack["seconds"] = 0;
+  }
   sendJson(ack);
 }
 
@@ -309,7 +336,11 @@ void handleFill(JsonObject obj) {
   if (obj.containsKey("nivel")) {
     ack["nivel"] = obj["nivel"].as<const char *>();
   }
-  ack["t_ms"] = durationMs;
+  if (durationMs > 0) {
+    ack["seconds"] = durationMs / 1000.0;
+  } else {
+    ack["seconds"] = 0;
+  }
   sendJson(ack);
 }
 
@@ -331,9 +362,126 @@ void handleBuzzer(JsonObject obj) {
   sendJson(ack);
 }
 
+void handleLegacyOut(JsonObject obj) {
+  String target = obj["target"] | "";
+  target.toUpperCase();
+  bool active = obj.containsKey("on") ? (obj["on"].as<int>() != 0) : false;
+
+  if (target == "DRAIN") {
+    drainSet(!active);
+    drainTimerActive = false;
+  } else if (target == "WATER_COLD") {
+    if (active) {
+      drainSet(false);
+      digitalWrite(REL_WATER_FRIA, HIGH);
+    } else {
+      digitalWrite(REL_WATER_FRIA, LOW);
+    }
+    fillColdActive = false;
+  } else if (target == "WATER_HOT") {
+    if (active) {
+      drainSet(false);
+      digitalWrite(REL_WATER_CALIENTE, HIGH);
+    } else {
+      digitalWrite(REL_WATER_CALIENTE, LOW);
+    }
+    fillHotActive = false;
+  } else if (target == "DOOR_LOCK") {
+    doorLock(active);
+  } else if (target == "Q1" || target == "Q2" || target == "Q3" || target == "Q4") {
+    const uint8_t pins[4] = {REL_Q1, REL_Q2, REL_Q3, REL_Q4};
+    uint8_t index = target.charAt(1) - '1';
+    if (index < 4) {
+      digitalWrite(pins[index], active ? HIGH : LOW);
+      if (!active) {
+        chemActive[index] = false;
+      }
+    }
+  }
+
+  StaticJsonDocument<192> ack;
+  ack["ack"] = "out";
+  ack["target"] = target;
+  ack["on"] = active;
+  sendJson(ack);
+}
+
+void handleLegacyDose(JsonObject obj) {
+  String which = obj["which"] | "";
+  which.toUpperCase();
+  uint32_t durationMs = secondsToMs(obj["seconds"]);
+  uint8_t index = 255;
+  if (which == "Q1") index = 0;
+  else if (which == "Q2") index = 1;
+  else if (which == "Q3") index = 2;
+  else if (which == "Q4") index = 3;
+
+  if (index != 255) {
+    if (durationMs == 0) {
+      stopChem(index);
+    } else {
+      startChem(index, durationMs);
+    }
+  }
+
+  StaticJsonDocument<160> ack;
+  ack["ack"] = "dose";
+  ack["which"] = which;
+  if (durationMs > 0) {
+    ack["seconds"] = durationMs / 1000.0;
+  } else {
+    ack["seconds"] = 0;
+  }
+  sendJson(ack);
+}
+
+void handleLegacyVfd(JsonObject obj) {
+  String run = obj["run"] | "off";
+  String dir = obj["dir"] | "cw";
+  String speed = obj["speed"] | "low";
+  run.toLowerCase();
+  dir.toLowerCase();
+  speed.toLowerCase();
+
+  String level = "medio";
+  if (speed == "low") level = "bajo";
+  else if (speed == "high") level = "alto";
+  speedNivel = level;
+  setSpeedPresets(speedNivel);
+
+  if (run == "on") {
+    if (dir == "ccw") {
+      motorRev();
+    } else {
+      motorFwd();
+    }
+  } else {
+    motorStop();
+  }
+
+  StaticJsonDocument<160> ack;
+  ack["ack"] = "vfd";
+  ack["run"] = run;
+  ack["dir"] = dir;
+  ack["speed"] = speed;
+  sendJson(ack);
+}
+
+void handleLegacyBeep(JsonObject obj) {
+  uint32_t durationMs = obj.containsKey("ms") ? obj["ms"].as<uint32_t>() : 120;
+  buzzerOn(durationMs);
+
+  StaticJsonDocument<128> ack;
+  ack["ack"] = "beep";
+  ack["ms"] = durationMs;
+  sendJson(ack);
+}
+
 void handleCommand(JsonObject obj) {
   const char *cmd = obj["cmd"] | "";
-  if (strcmp(cmd, "vfd_speed") == 0) {
+  if (strcmp(cmd, "door") == 0) {
+    handleDoor(obj);
+  } else if (strcmp(cmd, "vfd_speed") == 0) {
     handleVfdSpeed(obj);
   } else if (strcmp(cmd, "motor") == 0) {
     handleMotor(obj);
@@ -345,6 +493,14 @@ void handleCommand(JsonObject obj) {
     handleChem(obj);
   } else if (strcmp(cmd, "buzzer") == 0) {
     handleBuzzer(obj);
+  } else if (strcmp(cmd, "out") == 0) {
+    handleLegacyOut(obj);
+  } else if (strcmp(cmd, "dose") == 0) {
+    handleLegacyDose(obj);
+  } else if (strcmp(cmd, "vfd") == 0) {
+    handleLegacyVfd(obj);
+  } else if (strcmp(cmd, "beep") == 0) {
+    handleLegacyBeep(obj);
   } else {
     StaticJsonDocument<128> ack;
     ack["ack"] = "unknown";

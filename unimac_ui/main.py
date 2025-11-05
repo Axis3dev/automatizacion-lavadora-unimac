@@ -14,7 +14,6 @@ try:
     from .settings import SettingsDialog
     from .editor_v2 import TouchCycleEditor
     from .dialogs import BusyDialog
-    from .esp32proto import Esp32Controller
     from .alerts import toast
 except ImportError:
     import sys
@@ -27,7 +26,6 @@ except ImportError:
     from unimac_ui.settings import SettingsDialog
     from unimac_ui.editor_v2 import TouchCycleEditor
     from unimac_ui.dialogs import BusyDialog
-    from unimac_ui.esp32proto import Esp32Controller
     from unimac_ui.alerts import toast
 
 
@@ -67,6 +65,7 @@ class WasherUI(tk.Tk):
             poll_sec=0.5,
             on_connect=self._on_comm_connected,
             on_disconnect=self._on_comm_disconnected,
+            tk_after=self.after,
         )
         self.comm_watcher.start()
 
@@ -77,22 +76,12 @@ class WasherUI(tk.Tk):
             get_fill_seconds=self._fill_table,
             get_dose_seconds=self._chem_table,
         )
-        self.controller = Esp32Controller(
-            after=self.after,
-            cancel_after=self.after_cancel,
-            send=lambda obj: self.serial.send_json(obj),
-            on_info=lambda s: self.toast(s),
-            get_dose_seconds=self._chem_table,
-            get_alt_seconds=lambda: self._safe_int(self._globals_cfg().get("motor_alt_seconds", 0), 0),
-            get_fill_seconds=self._fill_table,
-        )
         self.executor = Executor(
             self.hw,
             self._update_status_text,
             self._on_tick,
             self._on_step_change,
             self._on_finish,
-            controller=self.controller,
             send_event=lambda payload: self.serial.send_json(payload),
             get_fill_seconds=self._fill_table,
             get_chem_seconds=self._chem_table,
@@ -544,6 +533,7 @@ class WasherUI(tk.Tk):
             poll_sec=0.5,
             on_connect=self._on_comm_connected,
             on_disconnect=self._on_comm_disconnected,
+            tk_after=self.after,
         )
         self.comm_watcher.start()
         self._update_comm_panel_now()

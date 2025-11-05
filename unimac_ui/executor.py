@@ -240,6 +240,8 @@ class Executor:
         self._tick_fraction = 0.0
 
         self._emit_start_event()
+        self._send({"cmd": "door", "lock": True})
+        self._send({"cmd": "buzzer", "on": True, "t_ms": 120})
         self._apply_step(self.cycle.pasos[self.step_index])
         self.cb.on_status("Ejecutando")
 
@@ -248,8 +250,6 @@ class Executor:
             self.state = Executor.PAUSED
             self._set_motor(False)
             self.hw.stop_all()
-            if self.controller and hasattr(self.controller, "cancel_all"):
-                self.controller.cancel_all()
             self._send_event({"event": "pause", "reason": "user"})
             self.cb.on_status("Pausado")
         elif self.state == Executor.PAUSED:
@@ -268,8 +268,7 @@ class Executor:
         self.hw.stop_all()
         self.hw.drain_open(True)
         self._send({"cmd": "drain", "open": True})
-        if self.controller and hasattr(self.controller, "cancel_all"):
-            self.controller.cancel_all()
+        self._send({"cmd": "door", "lock": False})
         self._send_event({"event": "stop"})
         self.cb.on_status("Detenido (paro seguro)")
         self.current_speed = None
@@ -280,8 +279,7 @@ class Executor:
         self.hw.stop_all()
         self.hw.drain_open(True)
         self._send({"cmd": "drain", "open": True})
-        if self.controller and hasattr(self.controller, "finish_cycle"):
-            self.controller.finish_cycle()
+        self._send({"cmd": "door", "lock": False})
         self._send_event({"event": "finish"})
         self.cb.on_status("Ciclo terminado")
         self.cb.on_finish()
@@ -354,8 +352,6 @@ class Executor:
             if self._drain_label:
                 payload["label"] = self._drain_label
             self._send_event(payload)
-            if self.controller and hasattr(self.controller, "close_drain"):
-                self.controller.close_drain()
             self.in_drain_pause = False
             self._drain_profile = None
             self._drain_label = None
@@ -366,9 +362,9 @@ class Executor:
         self.state = Executor.STOPPED
         self._set_motor(False)
         self.hw.stop_all()
-        if self.controller and hasattr(self.controller, "cancel_all"):
-            self.controller.cancel_all()
         self.hw.drain_open(True)
+        self._send({"cmd": "drain", "open": True})
+        self._send({"cmd": "door", "lock": False})
         self._send_event({"event": "emergency"})
         self.cb.on_status("Paro de emergencia")
         self.current_speed = None
@@ -386,8 +382,6 @@ class Executor:
         steps = len(getattr(self.cycle, "pasos", []))
         name = getattr(self.cycle, "nombre", "")
         self._send_event({"event": "start", "cycle": name, "steps": steps, "total": total})
-        if self.controller and hasattr(self.controller, "start_cycle"):
-            self.controller.start_cycle()
 
     def _apply_step(self, step):
         self._current_step = step
@@ -456,8 +450,6 @@ class Executor:
             "t_s": fill_seconds,
         })
         self._send_event({"event": "fill", "temp": temp_event, "seconds": fill_seconds})
-        if self.controller and hasattr(self.controller, "begin_fill"):
-            self.controller.begin_fill(self._current_level, self._agua_temp)
 
         chemicals = getattr(step, "quimicos", []) or []
         for chem in chemicals:
@@ -471,21 +463,17 @@ class Executor:
             self.hw.add_chemical(chem)
             self._send({"cmd": "chem", "id": ident, "t_s": secs})
             self._send_event({"event": "chem", "id": ident, "seconds": secs})
-            if self.controller and hasattr(self.controller, "dose"):
-                self.controller.dose(hw_ident, secs)
 
         self._start_motor()
 
     def _start_spin_step(self, step):
         print(f"[EXEC] Iniciando centrifugado")
-        self.hw.drain_open(True)
-        self._send({"cmd": "drain", "open": True})
-        self._send_event({"event": "drain", "open": True, "seconds": self.step_remaining})
+        self.hw.drain_open(False)
+        self._send({"cmd": "drain", "open": False})
+        self._send_event({"event": "drain", "open": False, "seconds": self.step_remaining})
         speed = self._apply_speed_for_step(step)
         self.hw.spin(speed)
         self._set_motor(True, direction="FWD")
-        if self.controller and hasattr(self.controller, "run_drain"):
-            self.controller.run_drain(self.step_remaining)
 
     def _start_drain_step(self, step):
         print(f"[EXEC] Iniciando drenaje explícito")
@@ -493,8 +481,6 @@ class Executor:
         self.hw.drain_open(True)
         self._send({"cmd": "drain", "open": True})
         self._send_event({"event": "drain", "open": True, "seconds": self.step_remaining})
-        if self.controller and hasattr(self.controller, "run_drain"):
-            self.controller.run_drain(self.step_remaining)
 
     def _apply_speed_for_step(self, step) -> str:
         default_speed = "alto" if self._current_action in Executor.SPIN_ACTIONS else "medio"
@@ -544,8 +530,6 @@ class Executor:
                     "label": label,
                 })
                 self._send_event({"event": "pause", "reason": "drain_pause", "seconds": drain})
-                if self.controller and hasattr(self.controller, "run_drain"):
-                    self.controller.run_drain(drain)
                 return
         self.in_drain_pause = False
         self._drain_profile = None
@@ -581,8 +565,6 @@ class Executor:
             cmd_dir = "STOP"
         self._send({"cmd": "motor", "dir": cmd_dir})
         self._send_event({"event": event})
-        if self.controller and hasattr(self.controller, "motor"):
-            self.controller.motor(run=run, direction=self._motor_dir, speed=self._motor_speed)
 
     def _update_motor_alt(self):
         if not self._motor_is_agitation:
