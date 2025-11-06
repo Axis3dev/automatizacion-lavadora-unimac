@@ -1,27 +1,28 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
 
-// Output pin definitions
+// ================= Pinout actualizado =================
 const uint8_t PIN_BUZZER = 4;
 
-const uint8_t PIN_Q1_DETERGENTE = 16;
-const uint8_t PIN_Q2_QUITAMANCHAS = 17;
-const uint8_t PIN_Q3_SUAVIZANTE = 5;
-const uint8_t PIN_Q4_BLANQUEADOR = 18;
+const uint8_t PIN_Q1_DETERGENTE = 21;
+const uint8_t PIN_Q2_QUITAMANCHAS = 19;
+const uint8_t PIN_Q3_SUAVIZANTE = 18;
+const uint8_t PIN_Q4_BLANQUEADOR = 5;
 
-const uint8_t PIN_V_AF_FRIA = 19;
-const uint8_t PIN_V_AC_CALIENTE = 21;
-const uint8_t PIN_DREN_CERRAR = 22;
+const uint8_t PIN_V_AF_FRIA = 17;      // WATER_COLD
+const uint8_t PIN_V_AC_CALIENTE = 16;  // WATER_HOT
+const uint8_t PIN_DREN_CERRAR = 22;    // NA valve: HIGH = close
 const uint8_t PIN_LOCK_PUERTA = 23;
 
-const uint8_t PIN_MOTOR_FWD = 13;
-const uint8_t PIN_MOTOR_REV = 14;
-const uint8_t PIN_VFD_RUN = 27;
-const uint8_t PIN_VFD_DIR = 26;
+const uint8_t PIN_MOTOR_FWD = 14;
+const uint8_t PIN_MOTOR_REV = 27;
+const uint8_t PIN_VFD_RUN = 26;
+const uint8_t PIN_VFD_DIR = 25;
 
-const uint8_t PIN_SPEED_BAJA = 25;
-const uint8_t PIN_SPEED_MEDIA = 33;
-const uint8_t PIN_SPEED_ALTA = 32;
+const uint8_t PIN_SPEED_BAJA = 33;
+const uint8_t PIN_SPEED_MEDIA = 32;
+const uint8_t PIN_SPEED_ALTA = 13;
+// ======================================================
 
 // Input pin definitions
 const uint8_t PIN_EMERGENCY_STOP = 35;
@@ -270,6 +271,9 @@ void processEvent(JsonDocument &doc) {
 
 void setup() {
   Serial.begin(115200);
+
+  Serial.println(F("[PINMAP] Q1=21 Q2=19 Q3=18 Q4=5 COLD=17 HOT=16 DRAIN=22 DOOR=23"));
+  Serial.println(F("[PINMAP] FWD=14 REV=27 RUN=26 DIR=25 SLOW=33 MED=32 FAST=13 BUZ=4"));
 
   const uint8_t outputs[] = {
     PIN_BUZZER,
