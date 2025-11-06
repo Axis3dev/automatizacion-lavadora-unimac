@@ -1,0 +1,35 @@
+# ====== SALIDAS (ESP32 → Relés/Señales) ======
+GPIO04 - BUZZER - salida digital - Activo en HIGH
+
+# Relés (15 canales, activos en HIGH)
+GPIO16 - Q1_DETERGENTE - salida digital - Activo en HIGH
+GPIO17 - Q2_QUITAMANCHAS - salida digital - Activo en HIGH
+GPIO05 - Q3_SUAVIZANTE - salida digital - Activo en HIGH
+GPIO18 - Q4_BLANQUEADOR - salida digital - Activo en HIGH
+
+GPIO19 - V_AF_FRIA (válvula agua fría) - salida digital - Activo en HIGH
+GPIO21 - V_AC_CALIENTE (válvula agua caliente) - salida digital - Activo en HIGH
+GPIO22 - DREN_CERRAR (válvula drenaje NA; HIGH=cerrar) - salida digital - Activo en HIGH
+GPIO23 - LOCK_PUERTA (cerrojo) - salida digital - Activo en HIGH
+
+GPIO13 - MOTOR_FWD - salida digital - Activo en HIGH
+GPIO14 - MOTOR_REV - salida digital - Activo en HIGH
+GPIO27 - VFD_RUN - salida digital - Activo en HIGH
+GPIO26 - VFD_DIR - salida digital - Activo en HIGH
+
+GPIO25 - SPEED_BAJA - salida digital - Activo en HIGH
+GPIO33 - SPEED_MEDIA - salida digital - Activo en HIGH
+GPIO32 - SPEED_ALTA - salida digital - Activo en HIGH
+
+# ====== ENTRADAS / RESERVADOS ======
+GPIO35 - EMERGENCY_STOP (entrada digital, solo lectura) - Pull externo
+GPIO34 - VFD_FAULT (entrada digital, solo lectura) - Pull externo
+
+GPIO0  - RES_IN1 (reservado, entrada digital) - strapping pin (no usar como salida)
+GPIO2  - RES_IN2 (reservado, entrada digital) - strapping pin (no usar como salida)
+GPIO15 - RES_IN3 (reservado, entrada digital) - strapping pin (no usar como salida)
+
+# Notas:
+# - NO usar GPIO12 por conflictos de arranque del ESP32.
+# - Relés activos en HIGH; reposo en LOW.
+# - Drenaje es normalmente abierto (NA): HIGH = cerrar drenaje; LOW = abrir drenaje.

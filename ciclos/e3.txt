@@ -1,0 +1,8 @@
+nombre=e3
+temp_agua=caliente
+accion=prelavado;duracion=60;nivel=estandar;quimicos=detergente,quitamanchas
+accion=lavado;duracion=60;nivel=ligero;quimicos=detergente,blanqueador
+accion=enjuague;duracion=60;nivel=estandar;quimicos=suavizante
+accion=enjuague;duracion=60;nivel=ligero;quimicos=suavizante
+accion=centrifugado;duracion=60;velocidad=alto
+accion=drenaje;duracion=60
