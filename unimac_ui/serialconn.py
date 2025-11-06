@@ -3,9 +3,11 @@
 
 import json
 import os
+import re
+import sys
 import threading
 import time
-from typing import Callable, Iterable, Optional
+from typing import Callable, Iterable, List, Optional
 
 try:
     from serial import Serial, SerialException  # type: ignore
@@ -48,6 +50,92 @@ def _is_blocked_port(port: Optional[str]) -> bool:
     return port == BLOCKED_PORTS[0] or port.endswith(BLOCKED_PORTS[1])
 
 
+def _discover_ports() -> List[str]:
+    ports: List[str] = []
+
+    # 1) Enumeración estándar de pyserial
+    try:
+        if list_ports:
+            ports = [p.device for p in list_ports.comports()]
+            if not ports:
+                try:
+                    ports = [p.device for p in list_ports.comports(include_links=True)]
+                except TypeError:
+                    ports = [p.device for p in list_ports.comports()]
+    except Exception:
+        ports = []
+
+    plat = sys.platform.lower()
+
+    # Linux: excluir únicamente /dev/ttyAMA0
+    if "linux" in plat:
+        ports = [p for p in ports if p and not p.endswith("ttyAMA0")]
+
+    # Windows: fallback si pyserial no devolvió nada
+    if plat.startswith("win") and not ports:
+        com_pattern = re.compile(r"^COM\d+$", re.IGNORECASE)
+        candidates = [f"COM{i}" for i in range(1, 257)]
+        validated: List[str] = []
+        try:
+            if list_ports:
+                existing = {p.device.upper() for p in list_ports.comports()}
+                validated = [c for c in candidates if c.upper() in existing and com_pattern.match(c)]
+        except Exception:
+            validated = []
+
+        if not validated:
+            try:  # Último recurso: QueryDosDeviceW para detectar puertos reales
+                import ctypes
+
+                kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+                buffer_len = 1024
+                for cand in candidates:
+                    buf = ctypes.create_unicode_buffer(buffer_len)  # type: ignore[attr-defined]
+                    res = kernel32.QueryDosDeviceW(cand, buf, buffer_len)
+                    if res != 0 and com_pattern.match(cand):
+                        validated.append(cand)
+                    else:
+                        err = ctypes.GetLastError()
+                        if err == 122 and com_pattern.match(cand):  # ERROR_INSUFFICIENT_BUFFER
+                            validated.append(cand)
+                        kernel32.SetLastError(0)
+            except Exception:
+                validated = []
+
+        if not validated:
+            validated = [c for c in candidates if com_pattern.match(c)]
+
+        ports = validated
+
+    # macOS: priorizar /dev/cu.*
+    if plat == "darwin":
+        ports = [p for p in ports if p and "/dev/cu." in p]
+
+    # Deduplicar y ordenar
+    uniq: List[str] = []
+    seen = set()
+    for port in ports:
+        if not port:
+            continue
+        if port in seen:
+            continue
+        uniq.append(port)
+        seen.add(port)
+
+    uniq.sort()
+
+    try:
+        import serial  # type: ignore
+
+        print(
+            f"[SERIAL] pyserial={getattr(serial, '__version__', 'unknown')} platform={sys.platform} ports={uniq}"
+        )
+    except Exception:
+        print(f"[SERIAL] platform={sys.platform} ports={uniq}")
+
+    return uniq
+
+
 class SerialConn:
     """Wrapper mínima sobre pyserial con autoconexión y envío JSON."""
 
@@ -59,14 +147,9 @@ class SerialConn:
         self.port_name: Optional[str] = None
 
     # ------------------------------- utilidades -------------------------------
-    def list_ports(self) -> Iterable[str]:
-        if list_ports is None:
-            return []
-        try:
-            ports = [p.device for p in list_ports.comports()]
-        except Exception:
-            ports = []
-        return [p for p in ports if not _is_blocked_port(p)]
+    @staticmethod
+    def list_available_ports() -> List[str]:
+        return _discover_ports()
 
     def is_connected(self) -> bool:
         with self._lock:
@@ -108,7 +191,9 @@ class SerialConn:
         if self.preferred_port and not _is_blocked_port(self.preferred_port):
             if self.connect(self.preferred_port):
                 return True
-        for port in self.list_ports():
+        for port in self.list_available_ports():
+            if _is_blocked_port(port):
+                continue
             if self.connect(port):
                 return True
         return False
@@ -206,7 +291,7 @@ class CommWatcher(threading.Thread):
             time.sleep(0.1)
 
     def _attempt_reconnect(self, available_ports: Iterable[str]) -> bool:
-        ports = list(available_ports)
+        ports = [p for p in available_ports if not _is_blocked_port(p)]
         target = self.serial.preferred_port
         if target and not _is_blocked_port(target):
             if target not in ports:
@@ -220,7 +305,9 @@ class CommWatcher(threading.Thread):
             if self.serial.connect(port):
                 return True
         if not target:
-            for port in self.serial.list_ports():
+            for port in self.serial.list_available_ports():
+                if _is_blocked_port(port):
+                    continue
                 if self.serial.connect(port):
                     return True
         return False
@@ -234,7 +321,7 @@ class CommWatcher(threading.Thread):
             try:
                 connected = self.serial.is_connected()
                 current_port = self.serial.port_name
-                available_ports = list(self.serial.list_ports())
+                available_ports = list(self.serial.list_available_ports())
                 port_present = current_port in available_ports if current_port else False
                 alive = self.serial._alive_touch() if connected else False
 

@@ -7,11 +7,6 @@ from tkinter import ttk, messagebox
 from typing import Callable, Optional, Dict
 
 try:
-    from serial.tools import list_ports
-except Exception:
-    list_ports = None
-
-try:
     from .serialconn import SerialConn
 except ImportError:
     from unimac_ui.serialconn import SerialConn
@@ -248,18 +243,28 @@ class SettingsDialog(tk.Toplevel):
 
     # comunicación
     def _refresh_ports(self):
-        ports=[]
         try:
-            if list_ports:
-                ports = [p.device for p in list_ports.comports() if "/dev/ttyAMA0" not in (p.device or "")]
+            from .serialconn import SerialConn as _SC
+        except ImportError:
+            from unimac_ui.serialconn import SerialConn as _SC
+
+        ports = []
+        try:
+            ports = _SC.list_available_ports()
         except Exception:
-            pass
-        if not ports and self.serial.port_name:
-            ports=[self.serial.port_name]
-        self.port_cb["values"]=ports
-        if self.port_var.get() and self.port_var.get() not in ports and self.port_var.get()!="":
-            self.port_var.set(self.port_var.get())
-        elif ports and not self.port_var.get():
+            ports = []
+
+        self.port_cb["values"] = ports
+
+        current = (self.port_var.get() or "").strip()
+
+        if not ports:
+            self.port_var.set("")
+            return
+
+        if current and current in ports:
+            self.port_var.set(current)
+        else:
             self.port_var.set(ports[0])
 
     def _connect_now(self):

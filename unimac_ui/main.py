@@ -59,6 +59,11 @@ class WasherUI(tk.Tk):
 
         # Serial
         self.serial = SerialConn(baudrate=BAUDRATE, preferred_port=PREFERRED_PORT)
+        try:
+            from .serialconn import SerialConn as _SC
+        except ImportError:
+            from unimac_ui.serialconn import SerialConn as _SC
+        print("[DEBUG] Puertos detectados al inicio:", _SC.list_available_ports())
         self._comm_last_state = self.serial.is_connected()
         self.comm_watcher = CommWatcher(
             self.serial,
