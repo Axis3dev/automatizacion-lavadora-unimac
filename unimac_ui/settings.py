@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
 import os
-import threading
 import tkinter as tk
 import tkinter.font as tkfont
-from tkinter import ttk, messagebox
+from tkinter import ttk
 from typing import Callable, Optional, Dict
+import threading
 
 try:
     from .serialconn import SerialConn
@@ -268,16 +268,83 @@ class SettingsDialog(tk.Toplevel):
             self.port_var.set(ports[0])
 
     def _connect_now(self):
-        sel_port = self.port_var.get().strip() or None
-        sel_baud = int(self.baud_var.get() or 115200)
+        """Conectar sin salir de Configuración."""
+        sel_port = (self.port_var.get() or "").strip() or None
+        try:
+            sel_baud = int(self.baud_var.get() or 115200)
+        except Exception:
+            sel_baud = 115200
+
         def task():
+            ok = False
+            err_msg = ""
             try:
                 self.serial.baudrate = sel_baud
-                ok = self.serial.connect(sel_port) if sel_port else self.serial.connect_auto()
-                self.after(0, lambda: messagebox.showinfo("Conexión","Conectado" if ok else "No se pudo conectar"))
-            except Exception as e:
-                self.after(0, lambda: messagebox.showerror("Error", str(e)))
+                if sel_port:
+                    ok = self.serial.connect(sel_port)
+                else:
+                    ok = self.serial.connect_auto()
+
+                if ok:
+                    try:
+                        self.master.serial.preferred_port = self.serial.port_name
+                    except Exception:
+                        pass
+
+                    try:
+                        watcher = getattr(self.master, "comm_watcher", None)
+                        if watcher:
+                            watcher.stop()
+                            watcher.join(timeout=1.0)
+                    except Exception:
+                        pass
+
+                    try:
+                        from .serialconn import CommWatcher as _CW
+                    except ImportError:
+                        from unimac_ui.serialconn import CommWatcher as _CW
+
+                    self.master.comm_watcher = _CW(
+                        self.master.serial,
+                        poll_sec=0.5,
+                        on_connect=getattr(self.master, "_on_comm_connected", None),
+                        on_disconnect=getattr(self.master, "_on_comm_disconnected", None),
+                        tk_after=self.master.after,
+                    )
+                    self.master.comm_watcher.start()
+            except Exception as exc:
+                err_msg = str(exc)
+                ok = False
+
+            self.after(0, lambda: self._post_connect_ui(ok, err_msg))
+
         threading.Thread(target=task, daemon=True).start()
+
+    def _post_connect_ui(self, ok: bool, err: str = ""):
+        if ok and self.serial.port_name:
+            try:
+                self.port_var.set(self.serial.port_name)
+            except Exception:
+                pass
+
+        try:
+            self.master._update_comm_panel_now()
+        except Exception:
+            pass
+
+        if ok:
+            try:
+                self.master.toast("Conectado")
+            except Exception:
+                pass
+        else:
+            msg = "No se pudo conectar"
+            if err:
+                msg = f"{msg}: {err}"
+            try:
+                self.master.toast(msg)
+            except Exception:
+                pass
 
     # sistema
     def _close_app(self):

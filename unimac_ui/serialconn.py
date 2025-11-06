@@ -9,10 +9,12 @@ import threading
 import time
 from typing import Callable, Iterable, List, Optional
 
-try:
+try:  # pragma: no cover - importación opcional
+    import serial  # type: ignore
     from serial import Serial, SerialException  # type: ignore
     from serial.tools import list_ports  # type: ignore
 except Exception:  # pragma: no cover - entorno sin pyserial
+    serial = None  # type: ignore
     Serial = None  # type: ignore
     SerialException = Exception  # type: ignore
     list_ports = None  # type: ignore
@@ -142,8 +144,8 @@ class SerialConn:
     def __init__(self, baudrate: int = BAUDRATE, preferred_port: Optional[str] = PREFERRED_PORT):
         self.baudrate = int(baudrate or 115200)
         self.preferred_port = preferred_port
-        self._serial: Optional[Serial] = None
         self._lock = threading.Lock()
+        self.ser: Optional[Serial] = None
         self.port_name: Optional[str] = None
 
     # ------------------------------- utilidades -------------------------------
@@ -152,62 +154,104 @@ class SerialConn:
         return _discover_ports()
 
     def is_connected(self) -> bool:
-        with self._lock:
-            ser = self._serial
-        return bool(ser and ser.is_open)
+        try:
+            with self._lock:
+                ser = self.ser
+            return bool(ser and getattr(ser, "is_open", False))
+        except Exception:
+            return False
 
     # ------------------------------- conexión --------------------------------
-    def connect(self, port: str) -> bool:
-        if _is_blocked_port(port) or Serial is None:
-            return False
-
-        try:
-            ser = Serial(
-                port=port,
-                baudrate=self.baudrate,
-                timeout=0,
-                write_timeout=0.2,
-            )
-            ser.reset_input_buffer()
-            ser.reset_output_buffer()
-        except (SerialException, OSError, ValueError):
-            return False
-
-        with self._lock:
-            if self._serial and self._serial.is_open:
-                try:
-                    self._serial.close()
-                except Exception:
-                    pass
-            self._serial = ser
-            self.port_name = port
-            self.preferred_port = port
-        CFG["serial_port"] = port
-        CFG["baudrate"] = self.baudrate
-        save_config(CFG)
-        return True
-
-    def connect_auto(self) -> bool:
-        if self.preferred_port and not _is_blocked_port(self.preferred_port):
-            if self.connect(self.preferred_port):
-                return True
-        for port in self.list_available_ports():
-            if _is_blocked_port(port):
-                continue
-            if self.connect(port):
-                return True
-        return False
-
     def close(self) -> None:
         with self._lock:
-            ser = self._serial
-            self._serial = None
+            ser = self.ser
+            self.ser = None
             self.port_name = None
         if ser:
             try:
                 ser.close()
             except Exception:
                 pass
+
+    def connect(self, port: str) -> bool:
+        if not port or _is_blocked_port(port) or serial is None or Serial is None:
+            return False
+
+        try:
+            self.close()
+
+            kwargs = dict(
+                port=port,
+                baudrate=int(self.baudrate or 115200),
+                timeout=0.1,
+                write_timeout=0.5,
+                rtscts=False,
+                dsrdtr=False,
+            )
+            if sys.platform.startswith("linux") or sys.platform == "darwin":
+                kwargs["exclusive"] = False
+
+            ser = Serial(**kwargs)
+
+            try:
+                ser.setDTR(False)
+                ser.setRTS(False)
+                time.sleep(0.05)
+                ser.setDTR(True)
+                time.sleep(0.05)
+            except Exception:
+                pass
+
+            try:
+                ser.reset_input_buffer()
+                ser.reset_output_buffer()
+            except Exception:
+                pass
+
+            try:
+                ser.write(b'{"cmd":"ping"}\n')
+                ser.flush()
+                deadline = time.time() + 0.2
+                while time.time() < deadline and ser.in_waiting:
+                    _ = ser.read(ser.in_waiting)
+            except Exception:
+                pass
+
+            if not getattr(ser, "is_open", False):
+                try:
+                    ser.close()
+                except Exception:
+                    pass
+                return False
+
+            with self._lock:
+                self.ser = ser
+                self.port_name = port
+                self.preferred_port = port
+
+            CFG["serial_port"] = port
+            CFG["baudrate"] = self.baudrate
+            save_config(CFG)
+            return True
+        except Exception as exc:
+            print(f"[SERIAL][connect] Error abriendo {port}: {exc}")
+            self.close()
+            return False
+
+    def connect_auto(self) -> bool:
+        preferred = self.preferred_port
+        if preferred and not _is_blocked_port(preferred):
+            if self.connect(preferred):
+                return True
+
+        for port in self.list_available_ports():
+            if _is_blocked_port(port):
+                continue
+            if preferred and port == preferred:
+                continue
+            if self.connect(port):
+                return True
+        return False
 
     # -------------------------------- envío ----------------------------------
     def send_json(self, payload: dict) -> bool:
@@ -220,8 +264,8 @@ class SerialConn:
             return False
         data = (line + "\n").encode("utf-8")
         with self._lock:
-            ser = self._serial
-        if not ser or not ser.is_open:
+            ser = self.ser
+        if not ser or not getattr(ser, "is_open", False):
             print("[SER] drop send_json: port closed")
             return False
         try:
@@ -229,7 +273,7 @@ class SerialConn:
                 ser.write(data)
                 ser.flush()
         except (SerialException, OSError) as exc:
-            print(f"[SER] write error: {exc}")
+            print(f"[SERIAL][send_json] Error: {exc}")
             self.close()
             return False
         print(f"[SER→ESP] {line}")
@@ -238,7 +282,7 @@ class SerialConn:
     # ------------------------------- vigilancia -------------------------------
     def _alive_touch(self) -> bool:
         with self._lock:
-            ser = self._serial
+            ser = self.ser
         if not ser or not ser.is_open:
             return False
         try:
