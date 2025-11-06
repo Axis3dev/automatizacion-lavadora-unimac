@@ -1,5 +1,16 @@
 {
   "globals": {
+    "fill_seconds_ligero": 10,
+    "fill_seconds_estandar": 8,
+    "fill_seconds_intenso": 12,
+    "chem_seconds_detergente": 5,
+    "chem_seconds_quitamanchas": 5,
+    "chem_seconds_suavizante": 5,
+    "chem_seconds_blanqueador": 5,
+    "drain_seconds_ligero": 20,
+    "drain_seconds_estandar": 30,
+    "drain_seconds_intenso": 45,
+    "motor_alt_seconds": 5,
     "water_fill_seconds": {
       "ligero": 10,
       "estandar": 8,

@@ -1,15 +1,10 @@
 # -*- coding: utf-8 -*-
 import os
-import threading
 import tkinter as tk
 import tkinter.font as tkfont
-from tkinter import ttk, messagebox
+from tkinter import ttk
 from typing import Callable, Optional, Dict
-
-try:
-    from serial.tools import list_ports
-except Exception:
-    list_ports = None
+import threading
 
 try:
     from .serialconn import SerialConn
@@ -89,24 +84,40 @@ class SettingsDialog(tk.Toplevel):
 
         # Globals
         glb = self.CFG.get("globals", {})
-        fill_def = glb.get("water_fill_seconds", {"ligero":5,"estandar":8,"intenso":12})
-        self.var_ligero   = tk.StringVar(value=str(int(fill_def.get("ligero",5))))
-        self.var_estandar = tk.StringVar(value=str(int(fill_def.get("estandar",8))))
-        self.var_intenso  = tk.StringVar(value=str(int(fill_def.get("intenso",12))))
+        fill_legacy = glb.get("water_fill_seconds", {}) if isinstance(glb.get("water_fill_seconds", {}), dict) else {}
+        dose_legacy = glb.get("chem_dose_seconds", {}) if isinstance(glb.get("chem_dose_seconds", {}), dict) else {}
+        drain_legacy = glb.get("drain_seconds", {}) if isinstance(glb.get("drain_seconds", {}), dict) else {}
 
-        dose_def = glb.get("chem_dose_seconds", {"Q1":4,"Q2":3,"Q3":2,"Q4":2})
-        self.var_q1 = tk.StringVar(value=str(int(dose_def.get("Q1",4))))
-        self.var_q2 = tk.StringVar(value=str(int(dose_def.get("Q2",3))))
-        self.var_q3 = tk.StringVar(value=str(int(dose_def.get("Q3",2))))
-        self.var_q4 = tk.StringVar(value=str(int(dose_def.get("Q4",2))))
+        def _ival(value, default):
+            try:
+                return int(value)
+            except Exception:
+                return default
 
-        drain_def = glb.get("drain_seconds", {"ligero":20,"estandar":30,"intenso":45})
-        self.var_drain_l = tk.StringVar(value=str(int(drain_def.get("ligero",20))))
-        self.var_drain_e = tk.StringVar(value=str(int(drain_def.get("estandar",30))))
-        self.var_drain_i = tk.StringVar(value=str(int(drain_def.get("intenso",45))))
+        self.var_ligero   = tk.StringVar(value=str(_ival(glb.get("fill_seconds_ligero",   fill_legacy.get("ligero", 5)), 5)))
+        self.var_estandar = tk.StringVar(value=str(_ival(glb.get("fill_seconds_estandar", fill_legacy.get("estandar", 8)), 8)))
+        self.var_intenso  = tk.StringVar(value=str(_ival(glb.get("fill_seconds_intenso",  fill_legacy.get("intenso", 12)), 12)))
 
-        alt_def = int(glb.get("alternancia_motor_s", 0))
-        self.var_alt = tk.StringVar(value=str(alt_def))
+        self.var_q1 = tk.StringVar(value=str(_ival(glb.get("chem_seconds_detergente",  dose_legacy.get("Q1", 4)), 4)))
+        self.var_q2 = tk.StringVar(value=str(_ival(glb.get("chem_seconds_quitamanchas", dose_legacy.get("Q2", 3)), 3)))
+        self.var_q3 = tk.StringVar(value=str(_ival(glb.get("chem_seconds_suavizante",   dose_legacy.get("Q3", 2)), 2)))
+        self.var_q4 = tk.StringVar(value=str(_ival(glb.get("chem_seconds_blanqueador",  dose_legacy.get("Q4", 2)), 2)))
+
+        self.var_drain_l = tk.StringVar(value=str(_ival(glb.get("drain_seconds_ligero",   drain_legacy.get("ligero", 20)), 20)))
+        self.var_drain_e = tk.StringVar(value=str(_ival(glb.get("drain_seconds_estandar", drain_legacy.get("estandar", 30)), 30)))
+        self.var_drain_i = tk.StringVar(value=str(_ival(glb.get("drain_seconds_intenso",  drain_legacy.get("intenso", 45)), 45)))
+
+        try:
+            alt_def = int(glb.get("motor_alt_seconds", glb.get("alternancia_motor_s", 0)) or 0)
+        except Exception:
+            alt_def = 0
+        self.var_alt = tk.StringVar(value=str(max(0, alt_def)))
+
+        try:
+            pause_def = int(glb.get("motor_pause_seconds", 2) or 0)
+        except Exception:
+            pause_def = 2
+        self.var_motor_pause = tk.StringVar(value=str(max(0, pause_def)))
 
         root = ttk.Frame(self, padding=12); root.pack(fill="both", expand=True)
         main = ttk.Frame(root); main.pack(fill="both", expand=True, pady=(0,8))
@@ -182,8 +193,12 @@ class SettingsDialog(tk.Toplevel):
         e_alt = ttk.Entry(varsf, textvariable=self.var_alt, font=self.f_field, width=10, justify="right")
         e_alt.grid(row=15, column=1, sticky="w", pady=4)
 
+        ttk.Label(varsf, text="Pausa entre alternancias (s):", font=self.f_label).grid(row=16, column=0, sticky="w", padx=(0,8), pady=4)
+        e_alt_pause = ttk.Entry(varsf, textvariable=self.var_motor_pause, font=self.f_field, width=10, justify="right")
+        e_alt_pause.grid(row=16, column=1, sticky="w", pady=4)
+
         only_num = (self.register(lambda P: P.isdigit() or P==""), "%P")
-        for ent in (e_l, e_e, e_i, e_q1, e_q2, e_q3, e_q4, e_dl, e_de, e_di, e_alt):
+        for ent in (e_l, e_e, e_i, e_q1, e_q2, e_q3, e_q4, e_dl, e_de, e_di, e_alt, e_alt_pause):
             ent.configure(validate="key", validatecommand=only_num)
             ent.bind("<FocusIn>", lambda ev, widget=ent: self._show_kb(widget))
 
@@ -228,31 +243,108 @@ class SettingsDialog(tk.Toplevel):
 
     # comunicación
     def _refresh_ports(self):
-        ports=[]
         try:
-            if list_ports:
-                ports = [p.device for p in list_ports.comports() if "/dev/ttyAMA0" not in (p.device or "")]
+            from .serialconn import SerialConn as _SC
+        except ImportError:
+            from unimac_ui.serialconn import SerialConn as _SC
+
+        ports = []
+        try:
+            ports = _SC.list_available_ports()
         except Exception:
-            pass
-        if not ports and self.serial.port_name:
-            ports=[self.serial.port_name]
-        self.port_cb["values"]=ports
-        if self.port_var.get() and self.port_var.get() not in ports and self.port_var.get()!="":
-            self.port_var.set(self.port_var.get())
-        elif ports and not self.port_var.get():
+            ports = []
+
+        self.port_cb["values"] = ports
+
+        current = (self.port_var.get() or "").strip()
+
+        if not ports:
+            self.port_var.set("")
+            return
+
+        if current and current in ports:
+            self.port_var.set(current)
+        else:
             self.port_var.set(ports[0])
 
     def _connect_now(self):
-        sel_port = self.port_var.get().strip() or None
-        sel_baud = int(self.baud_var.get() or 115200)
+        """Conectar sin salir de Configuración."""
+        sel_port = (self.port_var.get() or "").strip() or None
+        try:
+            sel_baud = int(self.baud_var.get() or 115200)
+        except Exception:
+            sel_baud = 115200
+
         def task():
+            ok = False
+            err_msg = ""
             try:
                 self.serial.baudrate = sel_baud
-                ok = self.serial.connect(sel_port) if sel_port else self.serial.connect_auto()
-                self.after(0, lambda: messagebox.showinfo("Conexión","Conectado" if ok else "No se pudo conectar"))
-            except Exception as e:
-                self.after(0, lambda: messagebox.showerror("Error", str(e)))
+                if sel_port:
+                    ok = self.serial.connect(sel_port)
+                else:
+                    ok = self.serial.connect_auto()
+
+                if ok:
+                    try:
+                        self.master.serial.preferred_port = self.serial.port_name
+                    except Exception:
+                        pass
+
+                    try:
+                        watcher = getattr(self.master, "comm_watcher", None)
+                        if watcher:
+                            watcher.stop()
+                            watcher.join(timeout=1.0)
+                    except Exception:
+                        pass
+
+                    try:
+                        from .serialconn import CommWatcher as _CW
+                    except ImportError:
+                        from unimac_ui.serialconn import CommWatcher as _CW
+
+                    self.master.comm_watcher = _CW(
+                        self.master.serial,
+                        poll_sec=0.5,
+                        on_connect=getattr(self.master, "_on_comm_connected", None),
+                        on_disconnect=getattr(self.master, "_on_comm_disconnected", None),
+                        tk_after=self.master.after,
+                    )
+                    self.master.comm_watcher.start()
+            except Exception as exc:
+                err_msg = str(exc)
+                ok = False
+
+            self.after(0, lambda: self._post_connect_ui(ok, err_msg))
+
         threading.Thread(target=task, daemon=True).start()
+
+    def _post_connect_ui(self, ok: bool, err: str = ""):
+        if ok and self.serial.port_name:
+            try:
+                self.port_var.set(self.serial.port_name)
+            except Exception:
+                pass
+
+        try:
+            self.master._update_comm_panel_now()
+        except Exception:
+            pass
+
+        if ok:
+            try:
+                self.master.toast("Conectado")
+            except Exception:
+                pass
+        else:
+            msg = "No se pudo conectar"
+            if err:
+                msg = f"{msg}: {err}"
+            try:
+                self.master.toast(msg)
+            except Exception:
+                pass
 
     # sistema
     def _close_app(self):
@@ -262,19 +354,26 @@ class SettingsDialog(tk.Toplevel):
 
     def _on_save(self):
         fills={}
-        for key,var in (("ligero",self.var_ligero),("estandar",self.var_estandar),("intenso",self.var_intenso)):
+        for key,var in (("fill_seconds_ligero",self.var_ligero),
+                        ("fill_seconds_estandar",self.var_estandar),
+                        ("fill_seconds_intenso",self.var_intenso)):
             try: v=int(var.get() or "0")
             except Exception: v=0
             fills[key]=max(0,v)
 
         doses={}
-        for key,var in (("Q1",self.var_q1),("Q2",self.var_q2),("Q3",self.var_q3),("Q4",self.var_q4)):
+        for key,var in (("chem_seconds_detergente",self.var_q1),
+                        ("chem_seconds_quitamanchas",self.var_q2),
+                        ("chem_seconds_suavizante",self.var_q3),
+                        ("chem_seconds_blanqueador",self.var_q4)):
             try: v=int(var.get() or "0")
             except Exception: v=0
             doses[key]=max(0,v)
 
         drains={}
-        for key,var in (("ligero",self.var_drain_l),("estandar",self.var_drain_e),("intenso",self.var_drain_i)):
+        for key,var in (("drain_seconds_ligero",self.var_drain_l),
+                        ("drain_seconds_estandar",self.var_drain_e),
+                        ("drain_seconds_intenso",self.var_drain_i)):
             try: v=int(var.get() or "0")
             except Exception: v=0
             drains[key]=max(0,v)
@@ -282,6 +381,15 @@ class SettingsDialog(tk.Toplevel):
         try: alt = int(self.var_alt.get() or "0")
         except Exception: alt = 0
         alt = max(0, alt)
+
+        try:
+            motor_pause = int(self.var_motor_pause.get() or "0")
+        except Exception:
+            motor_pause = 0
+        motor_pause = max(0, motor_pause)
+
+        glb = self.CFG.setdefault("globals", {})
+        glb["motor_pause_seconds"] = motor_pause
 
         port = (self.port_var.get().strip() or None)
         try: baud = int(self.baud_var.get() or 0)

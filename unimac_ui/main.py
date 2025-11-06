@@ -14,7 +14,6 @@ try:
     from .settings import SettingsDialog
     from .editor_v2 import TouchCycleEditor
     from .dialogs import BusyDialog
-    from .esp32proto import Esp32Controller
     from .alerts import toast
 except ImportError:
     import sys
@@ -27,7 +26,6 @@ except ImportError:
     from unimac_ui.settings import SettingsDialog
     from unimac_ui.editor_v2 import TouchCycleEditor
     from unimac_ui.dialogs import BusyDialog
-    from unimac_ui.esp32proto import Esp32Controller
     from unimac_ui.alerts import toast
 
 
@@ -61,28 +59,73 @@ class WasherUI(tk.Tk):
 
         # Serial
         self.serial = SerialConn(baudrate=BAUDRATE, preferred_port=PREFERRED_PORT)
-        self.comm_watcher = CommWatcher(self.serial, poll_sec=0.5)
+        try:
+            from .serialconn import SerialConn as _SC
+        except ImportError:
+            from unimac_ui.serialconn import SerialConn as _SC
+        print("[DEBUG] Puertos detectados al inicio:", _SC.list_available_ports())
+        self._comm_last_state = self.serial.is_connected()
+        self.comm_watcher = CommWatcher(
+            self.serial,
+            poll_sec=0.5,
+            on_connect=self._on_comm_connected,
+            on_disconnect=self._on_comm_disconnected,
+            tk_after=self.after,
+        )
         self.comm_watcher.start()
 
         self.CFG = CFG
 
-        # HW / Executor
-        self.hw = HardwareIO()
-        self.executor = Executor(self.hw,
-                                 self._update_status_text,
-                                 self._on_tick,
-                                 self._on_step_change,
-                                 self._on_finish)
-
-        # Controller con accessors a config (dosis y alternancia)
-        self.controller = Esp32Controller(
-            after=self.after,
-            send=lambda obj: self.serial.send_json(obj),
-            on_info=lambda s: self.toast(s),
-            get_dose_seconds=lambda: self.CFG.get("globals", {}).get("chem_dose_seconds",
-                               {"Q1":4,"Q2":3,"Q3":2,"Q4":2}),
-            get_alt_seconds=lambda: int(self.CFG.get("globals", {}).get("alternancia_motor_s", 0) or 0)
+        # HW / Controller / Executor
+        self.hw = HardwareIO(
+            get_fill_seconds=self._fill_table,
+            get_dose_seconds=self._chem_table,
         )
+        self.executor = Executor(
+            self.hw,
+            self._update_status_text,
+            self._on_tick,
+            self._on_step_change,
+            self._on_finish,
+            send_event=lambda payload: self.serial.send_json(payload),
+            get_fill_seconds=self._fill_table,
+            get_chem_seconds=self._chem_table,
+            get_drain_seconds=self._drain_table,
+            get_motor_alt_seconds=self._motor_alt_seconds,
+        )
+        self.executor.ui_send_event = lambda ev, **kw: (
+            self._send_speed(kw.get("valor")) if ev == "speed" else self.serial.send_json({"event": ev, **kw})
+        )
+        self.executor.serial = self.serial
+        globals_cfg = self.CFG.get("globals", {}) if isinstance(self.CFG, dict) else {}
+
+        def _cfg_int(value, default):
+            try:
+                return int(value)
+            except Exception:
+                return default
+
+        fill_defaults = globals_cfg.get("water_fill_seconds", {}) if isinstance(globals_cfg.get("water_fill_seconds"), dict) else {}
+        self.executor.cfg_fill = {
+            "ligero": _cfg_int(globals_cfg.get("fill_seconds_ligero", fill_defaults.get("ligero", 5)), 5),
+            "estandar": _cfg_int(globals_cfg.get("fill_seconds_estandar", fill_defaults.get("estandar", 8)), 8),
+            "intenso": _cfg_int(globals_cfg.get("fill_seconds_intenso", fill_defaults.get("intenso", 12)), 12),
+        }
+
+        chem_defaults = globals_cfg.get("chem_dose_seconds", {}) if isinstance(globals_cfg.get("chem_dose_seconds"), dict) else {}
+        self.executor.cfg_chems = {
+            "detergente": _cfg_int(globals_cfg.get("chem_seconds_detergente", chem_defaults.get("Q1", 5)), 5),
+            "quitamanchas": _cfg_int(globals_cfg.get("chem_seconds_quitamanchas", chem_defaults.get("Q2", 5)), 5),
+            "suavizante": _cfg_int(globals_cfg.get("chem_seconds_suavizante", chem_defaults.get("Q3", 5)), 5),
+            "blanqueador": _cfg_int(globals_cfg.get("chem_seconds_blanqueador", chem_defaults.get("Q4", 5)), 5),
+        }
+
+        alt_default = globals_cfg.get("alternancia_motor_s", globals_cfg.get("motor_alt_seconds", 0))
+        pause_default = globals_cfg.get("motor_pause_seconds", 0)
+        self.executor.cfg_motor = {
+            "alt_every_s": _cfg_int(globals_cfg.get("motor_alt_seconds", alt_default), 0),
+            "alt_pause_s": _cfg_int(globals_cfg.get("motor_pause_seconds", pause_default), 0),
+        }
 
         # Estado UI
         self._settings_win = None
@@ -91,6 +134,8 @@ class WasherUI(tk.Tk):
         self._scroll_job = None
         self.current_cycle_total = 0
         self.current_step_name = tk.StringVar(value="—")
+        self._latched_cycle: Optional[Cycle] = None
+        self._latched_total_steps: int = 0
 
         self._build_ui()
         self._load_cycle_list()
@@ -115,14 +160,18 @@ class WasherUI(tk.Tk):
         root = ttk.Frame(self, padding=12); root.pack(fill="both", expand=True)
 
         bar = ttk.Frame(root); bar.pack(fill="x", pady=(0,8))
-        ttk.Button(bar, text="✎  Editar Ciclo", style="Top.TButton",
-                   command=self._select_or_edit).pack(side="left", padx=(0,8))
-        ttk.Button(bar, text="+  Crear Ciclo", style="Top.TButton",
-                   command=self._create_cycle_dialog).pack(side="left", padx=(0,8))
-        ttk.Button(bar, text="X  Eliminar", style="Top.TButton",
-                   command=self._delete_selected_cycle).pack(side="left", padx=(0,8))
-        ttk.Button(bar, text="⚙  Configuración", style="Top.TButton",
-                   command=self._open_settings).pack(side="right")
+        self.btn_edit = ttk.Button(bar, text="✎  Editar Ciclo", style="Top.TButton",
+                                   command=self._select_or_edit)
+        self.btn_edit.pack(side="left", padx=(0,8))
+        self.btn_create = ttk.Button(bar, text="+  Crear Ciclo", style="Top.TButton",
+                                     command=self._create_cycle_dialog)
+        self.btn_create.pack(side="left", padx=(0,8))
+        self.btn_delete = ttk.Button(bar, text="X  Eliminar", style="Top.TButton",
+                                     command=self._delete_selected_cycle)
+        self.btn_delete.pack(side="left", padx=(0,8))
+        self.btn_settings = ttk.Button(bar, text="⚙  Configuración", style="Top.TButton",
+                                       command=self._open_settings)
+        self.btn_settings.pack(side="right")
 
         body = ttk.Frame(root); body.pack(fill="both", expand=True)
 
@@ -198,22 +247,65 @@ class WasherUI(tk.Tk):
 
     def _send_event(self, event: str, **kw): self.serial.send_json({"event": event, **kw})
 
+    def _send_speed(self, nivel: Optional[str]):
+        nivel = (nivel or "medio").lower()
+        if nivel not in ("bajo", "medio", "alto"):
+            nivel = "medio"
+        self.serial.send_json({"event": "speed", "nivel": nivel})
+
+    # configuración global normalizada
+    @staticmethod
+    def _safe_int(value, default: int) -> int:
+        try:
+            return int(value)
+        except Exception:
+            return default
+
+    def _globals_cfg(self) -> Dict:
+        return self.CFG.setdefault("globals", {})
+
+    def _fill_table(self) -> Dict[str, int]:
+        g = self._globals_cfg()
+        return {
+            "ligero":   self._safe_int(g.get("fill_seconds_ligero", 5), 5),
+            "estandar": self._safe_int(g.get("fill_seconds_estandar", 8), 8),
+            "intenso":  self._safe_int(g.get("fill_seconds_intenso", 12), 12),
+        }
+
+    def _chem_table(self) -> Dict[str, int]:
+        g = self._globals_cfg()
+        return {
+            "Q1": self._safe_int(g.get("chem_seconds_detergente", 4), 4),
+            "Q2": self._safe_int(g.get("chem_seconds_quitamanchas", 3), 3),
+            "Q3": self._safe_int(g.get("chem_seconds_suavizante", 2), 2),
+            "Q4": self._safe_int(g.get("chem_seconds_blanqueador", 2), 2),
+        }
+
+    def _drain_table(self) -> Dict[str, int]:
+        g = self._globals_cfg()
+        return {
+            "ligero":   self._safe_int(g.get("drain_seconds_ligero", 20), 20),
+            "estandar": self._safe_int(g.get("drain_seconds_estandar", 30), 30),
+            "intenso":  self._safe_int(g.get("drain_seconds_intenso", 45), 45),
+        }
+
+    def _motor_alt_seconds(self) -> int:
+        return self._safe_int(self._globals_cfg().get("motor_alt_seconds", 0), 0)
+
     # agua/drenaje helpers
     def _action_uses_water(self, accion: str) -> bool:
         a = (accion or "").strip().lower()
         return a in ("prelavado", "lavado", "enjuague")
 
     def _fill_seconds_for_level(self, level: Optional[str]) -> int:
-        g = self.CFG.get("globals", {}).get("water_fill_seconds", {"ligero":5,"estandar":8,"intenso":12})
+        g = self._fill_table()
         key = (level or "estandar").strip().lower()
-        try: return int(g.get(key, g.get("estandar", 8)))
-        except Exception: return 8
+        return g.get(key, g.get("estandar", 8))
 
     def _drain_seconds_for_level(self, level: Optional[str]) -> int:
-        g = self.CFG.get("globals", {}).get("drain_seconds", {"ligero":20,"estandar":30,"intenso":45})
+        g = self._drain_table()
         key = (level or "estandar").strip().lower()
-        try: return int(g.get(key, g.get("estandar", 30)))
-        except Exception: return 30
+        return g.get(key, g.get("estandar", 30))
 
     # ciclos
     def _select_or_edit(self):
@@ -255,6 +347,9 @@ class WasherUI(tk.Tk):
         for f in list_cycles(): self.listbox.insert("end", f[:-4].replace("_"," "))
 
     def _on_list_select(self):
+        if self.executor.state in (Executor.RUNNING, Executor.PAUSED, Executor.HOLD):
+            return
+
         idx = self.listbox.curselection()
         if not idx: self.selected_cycle=None; self._render_details(None); return
         path = os.path.join(CICLOS_DIR, list_cycles()[idx[0]])
@@ -274,14 +369,7 @@ class WasherUI(tk.Tk):
 
     # estado/progreso
     def _update_status_text(self, text: str):
-        if text=="Ejecutando" and self.selected_cycle:
-            self._send_event("start", cycle=self.selected_cycle.nombre,
-                             steps=len(self.selected_cycle.pasos),
-                             total=self.selected_cycle.total_duracion)
-        elif text=="Pausado": self._send_event("pause")
-        elif text=="Reanudado": self._send_event("resume")
-        elif text.startswith("Detenido"): self._send_event("stop")
-        if not (self.selected_cycle and self.executor.state in (Executor.RUNNING, Executor.PAUSED, Executor.HOLD)):
+        if not (self._latched_cycle and self.executor.state in (Executor.RUNNING, Executor.PAUSED, Executor.HOLD)):
             self.status.config(text=f"Estado actual: {text}")
 
     def _fmt_secs(self, s:int)->str:
@@ -295,79 +383,38 @@ class WasherUI(tk.Tk):
         self.pb_var.set(pct); self.pb_pct.config(text=f"{pct}%")
 
     def _on_tick(self, step_idx:int, step_remaining:int, total_remaining:int):
-        if self.selected_cycle and self.executor.state in (Executor.RUNNING, Executor.PAUSED, Executor.HOLD):
-            step_n = step_idx + 1; total = len(self.selected_cycle.pasos)
-            label_state = "Pausado" if self.executor.state==Executor.PAUSED else ("Drenando" if self.executor.state==Executor.HOLD else "Lavando")
+        if self.executor.state in (Executor.RUNNING, Executor.PAUSED, Executor.HOLD):
+            cycle = self._latched_cycle or self.selected_cycle
+            total = self._latched_total_steps or (len(cycle.pasos) if cycle else 0)
+            step_n = step_idx + 1
+            if total <= 0:
+                total = max(1, step_n)
+            if self.executor.state == Executor.PAUSED:
+                label_state = "Pausado"
+            elif getattr(self.executor, "in_drain_pause", False):
+                label_state = "Drenando"
+            else:
+                label_state = "Lavando"
             self.status.config(text=f"Estado actual: {label_state} - Paso {step_n} de {total} - Tiempo restante: {self._fmt_secs(total_remaining)}")
         self._update_progress(total_remaining)
 
     def _on_step_change(self, i:int):
-        if not self.selected_cycle: return
-        try: s = self.selected_cycle.pasos[i]
+        cycle = self._latched_cycle or self.selected_cycle
+        if not cycle: return
+        try: s = cycle.pasos[i]
         except IndexError: return
-        self.current_cycle_total = self.selected_cycle.total_duracion
+        self.current_cycle_total = cycle.total_duracion
         self.current_step_name.set(f"Paso actual: {s.accion.capitalize()}")
-
-        # duración mínima por llenado si aplica
-        if self._action_uses_water(s.accion):
-            level = getattr(s,"nivel_agua", getattr(self.selected_cycle,"nivel_agua","estandar"))
-            fill_sec = self._fill_seconds_for_level(level)
-            try: cur = int(getattr(s,"duracion",0) or 0)
-            except Exception: cur = 0
-            if cur < fill_sec:
-                s.duracion = fill_sec
-                self.toast(f"Duración de '{s.accion}' ajustada a {fill_sec}s para completar llenado.")
-
-        # evento
-        self._send_event("step",
-                         index=i,
-                         accion=s.accion,
-                         duracion=int(getattr(s,"duracion",0) or 0),
-                         nivel=getattr(s,"nivel_agua",None),
-                         quimicos=getattr(s,"quimicos",[]),
-                         velocidad=getattr(s,"velocidad",None))
-
-        # drenaje entre pasos con PAUSA REAL
-        prev_step = None
-        if i>0 and self.selected_cycle:
-            try: prev_step = self.selected_cycle.pasos[i-1]
-            except Exception: prev_step = None
-
-        def start_current_step():
-            # al empezar el paso, asegurar estado "Ejecutando"
-            self.executor._clear_hold()
-            self.current_step_name.set(f"Paso actual: {s.accion.capitalize()}")
-            self.controller.run_step(
-                accion=s.accion,
-                duracion=int(getattr(s,"duracion",0) or 0),
-                nivel_agua=getattr(s,"nivel_agua", getattr(self.selected_cycle,"nivel_agua","estandar")),
-                agua=(getattr(self.selected_cycle,"agua_temp",None) or getattr(s,"agua",None)),
-                quimicos=list(getattr(s,"quimicos",[])),
-                velocidad=getattr(s,"velocidad",None),
-            )
-
-        if prev_step and self._action_uses_water(prev_step.accion):
-            next_is_spin_or_drain = (s.accion or "").strip().lower() in ("centrifugado","spin","drenaje","descarga")
-            if not next_is_spin_or_drain:
-                prev_level = getattr(prev_step,"nivel_agua", getattr(self.selected_cycle,"nivel_agua","estandar"))
-                dsec = self._drain_seconds_for_level(prev_level)
-                self.current_step_name.set("Drenando…")
-                self.executor.hold_for(dsec, label="Drenando…")
-                self.controller.run_drain(dsec)
-                self.after(dsec*1000 + 200, start_current_step)
-            else:
-                start_current_step()
-        else:
-            start_current_step()
 
     def _on_finish(self):
         self.btn_pause.config(state="disabled")
         self.btn_stop.config(state="disabled")
         self.btn_run.config(state="normal")
-        self.controller.finish_cycle()
-        self._send_event("finish")
         self.pb_var.set(100); self.pb_pct.config(text="100%")
         self.current_step_name.set("—")
+        self._latched_cycle = None
+        self._latched_total_steps = 0
+        self._set_run_ui_lock(False)
 
     # ejecución
     def _start_execution(self):
@@ -375,10 +422,12 @@ class WasherUI(tk.Tk):
             self.toast("Ya hay un ciclo en ejecución."); return
         if not self.selected_cycle:
             self.toast("Selecciona un ciclo primero."); return
+        self._latched_cycle = self.selected_cycle
+        self._latched_total_steps = len(self.selected_cycle.pasos)
         self.executor.load_cycle(self.selected_cycle)
         self.current_cycle_total = self.selected_cycle.total_duracion
         self.executor.start()
-        self.controller.start_cycle()
+        self._set_run_ui_lock(True)
         self._update_progress(self.executor.total_remaining)
         self.btn_run.config(state="disabled")
         self.btn_pause.config(state="normal", text="⏸  Pausar")
@@ -387,23 +436,19 @@ class WasherUI(tk.Tk):
     def _pause_resume(self):
         self.executor.pause()
         if self.executor.state == Executor.PAUSED:
-            self.controller.cancel_all()
             self.btn_pause.config(text="▶  Reanudar")
         else:
             self.btn_pause.config(text="⏸  Pausar")
 
     def _stop_execution(self):
         self.executor.stop()
-        self.controller.cancel_all()
-        # estado seguro mínimo
-        self.serial.send_json({"cmd":"vfd","run":"off"})
-        self.serial.send_json({"cmd":"out","target":"WATER_COLD","on":0})
-        self.serial.send_json({"cmd":"out","target":"WATER_HOT","on":0})
-        self.serial.send_json({"cmd":"out","target":"DRAIN","on":0})
         self.btn_pause.config(state="disabled")
         self.btn_stop.config(state="disabled")
         self.btn_run.config(state="normal")
         self.pb_var.set(0); self.pb_pct.config(text="0%"); self.current_step_name.set("—")
+        self._latched_cycle = None
+        self._latched_total_steps = 0
+        self._set_run_ui_lock(False)
 
     # settings
     def _open_settings(self):
@@ -425,19 +470,44 @@ class WasherUI(tk.Tk):
             self.serial.baudrate = new_baud; CFG["baudrate"] = new_baud; changed=True
 
         g = CFG.setdefault("globals", {})
-        g["water_fill_seconds"] = dict(new_fills or {})
-        g["chem_dose_seconds"]  = {
-            "Q1": int((new_doses or {}).get("Q1",4)),
-            "Q2": int((new_doses or {}).get("Q2",3)),
-            "Q3": int((new_doses or {}).get("Q3",2)),
-            "Q4": int((new_doses or {}).get("Q4",2)),
+
+        fills = new_fills or {}
+        doses = new_doses or {}
+        drains = new_drains or {}
+
+        g["fill_seconds_ligero"] = self._safe_int(fills.get("fill_seconds_ligero", g.get("fill_seconds_ligero", 5)), 5)
+        g["fill_seconds_estandar"] = self._safe_int(fills.get("fill_seconds_estandar", g.get("fill_seconds_estandar", 8)), 8)
+        g["fill_seconds_intenso"] = self._safe_int(fills.get("fill_seconds_intenso", g.get("fill_seconds_intenso", 12)), 12)
+
+        g["chem_seconds_detergente"] = self._safe_int(doses.get("chem_seconds_detergente", g.get("chem_seconds_detergente", 4)), 4)
+        g["chem_seconds_quitamanchas"] = self._safe_int(doses.get("chem_seconds_quitamanchas", g.get("chem_seconds_quitamanchas", 3)), 3)
+        g["chem_seconds_suavizante"] = self._safe_int(doses.get("chem_seconds_suavizante", g.get("chem_seconds_suavizante", 2)), 2)
+        g["chem_seconds_blanqueador"] = self._safe_int(doses.get("chem_seconds_blanqueador", g.get("chem_seconds_blanqueador", 2)), 2)
+
+        g["drain_seconds_ligero"] = self._safe_int(drains.get("drain_seconds_ligero", g.get("drain_seconds_ligero", 20)), 20)
+        g["drain_seconds_estandar"] = self._safe_int(drains.get("drain_seconds_estandar", g.get("drain_seconds_estandar", 30)), 30)
+        g["drain_seconds_intenso"] = self._safe_int(drains.get("drain_seconds_intenso", g.get("drain_seconds_intenso", 45)), 45)
+
+        g["motor_alt_seconds"] = self._safe_int(alt_seconds, 0)
+
+        # mantener estructura heredada para compatibilidad hacia atrás
+        g["water_fill_seconds"] = {
+            "ligero": g["fill_seconds_ligero"],
+            "estandar": g["fill_seconds_estandar"],
+            "intenso": g["fill_seconds_intenso"],
         }
-        g["drain_seconds"]      = {
-            "ligero":   int((new_drains or {}).get("ligero",20)),
-            "estandar": int((new_drains or {}).get("estandar",30)),
-            "intenso":  int((new_drains or {}).get("intenso",45)),
+        g["chem_dose_seconds"] = {
+            "Q1": g["chem_seconds_detergente"],
+            "Q2": g["chem_seconds_quitamanchas"],
+            "Q3": g["chem_seconds_suavizante"],
+            "Q4": g["chem_seconds_blanqueador"],
         }
-        g["alternancia_motor_s"] = int(alt_seconds or 0)
+        g["drain_seconds"] = {
+            "ligero": g["drain_seconds_ligero"],
+            "estandar": g["drain_seconds_estandar"],
+            "intenso": g["drain_seconds_intenso"],
+        }
+        g["alternancia_motor_s"] = g["motor_alt_seconds"]
 
         save_config(CFG)
 
@@ -462,7 +532,14 @@ class WasherUI(tk.Tk):
     def _after_reconnect(self, busy):
         try: busy.destroy()
         except Exception: pass
-        self.comm_watcher = CommWatcher(self.serial, poll_sec=0.5)
+        self._comm_last_state = self.serial.is_connected()
+        self.comm_watcher = CommWatcher(
+            self.serial,
+            poll_sec=0.5,
+            on_connect=self._on_comm_connected,
+            on_disconnect=self._on_comm_disconnected,
+            tk_after=self.after,
+        )
         self.comm_watcher.start()
         self._update_comm_panel_now()
         self.toast("Conexión actualizada.")
@@ -471,6 +548,45 @@ class WasherUI(tk.Tk):
     def _loop_logic(self):
         self.executor.tick()
         self.after(self.TICK_MS, self._loop_logic)
+
+    def _set_run_ui_lock(self, locked: bool):
+        state = "disabled" if locked else "normal"
+        try:
+            self.listbox.configure(state=state)
+        except Exception:
+            pass
+        for btn in (getattr(self, "btn_edit", None),
+                    getattr(self, "btn_create", None),
+                    getattr(self, "btn_delete", None),
+                    getattr(self, "btn_settings", None)):
+            if btn:
+                try:
+                    btn.configure(state=state)
+                except Exception:
+                    pass
+
+    def _on_comm_connected(self, port: Optional[str]):
+        def _cb():
+            first = not self._comm_last_state
+            self._comm_last_state = True
+            self._update_comm_panel_now()
+            if first:
+                if port:
+                    self.toast(f"Conectado a {port}")
+                else:
+                    self.toast("Dispositivo conectado")
+            if hasattr(self.executor, "on_serial_reconnected"):
+                self.executor.on_serial_reconnected()
+        self.after(0, _cb)
+
+    def _on_comm_disconnected(self):
+        def _cb():
+            was_connected = self._comm_last_state
+            self._comm_last_state = False
+            self._update_comm_panel_now()
+            if was_connected:
+                self.toast("Dispositivo desconectado")
+        self.after(0, _cb)
 
     def _on_close(self):
         try:
