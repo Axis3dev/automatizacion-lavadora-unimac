@@ -2,22 +2,24 @@
 #include <ArduinoJson.h>
 
 // ====== OUTPUT PINS ======
-const uint8_t REL_BUZZER       = 4;
-const uint8_t REL_Q1           = 16;
-const uint8_t REL_Q2           = 17;
-const uint8_t REL_Q3           = 5;
-const uint8_t REL_Q4           = 18;
-const uint8_t REL_WATER_FRIA   = 19;
-const uint8_t REL_WATER_CALIENTE = 21;
-const uint8_t REL_DRAIN        = 22;   // NA valve, HIGH = close
-const uint8_t REL_DOOR_LOCK    = 23;
-const uint8_t REL_MOTOR_FWD    = 13;
-const uint8_t REL_MOTOR_REV    = 14;
-const uint8_t REL_VFD_RUN      = 27;
-const uint8_t REL_VFD_DIR      = 26;
-const uint8_t REL_SPEED_BAJA   = 25;
-const uint8_t REL_SPEED_MEDIA  = 33;
-const uint8_t REL_SPEED_ALTA   = 32;
+// ================= Pinout actualizado =================
+const uint8_t REL_BUZZER         = 4;
+const uint8_t REL_Q1             = 21;
+const uint8_t REL_Q2             = 19;
+const uint8_t REL_Q3             = 18;
+const uint8_t REL_Q4             = 5;
+const uint8_t REL_WATER_FRIA     = 17;  // WATER_COLD
+const uint8_t REL_WATER_CALIENTE = 16;  // WATER_HOT
+const uint8_t REL_DRAIN          = 22;  // NA valve, HIGH = close
+const uint8_t REL_DOOR_LOCK      = 23;
+const uint8_t REL_MOTOR_FWD      = 14;
+const uint8_t REL_MOTOR_REV      = 27;
+const uint8_t REL_VFD_RUN        = 26;
+const uint8_t REL_VFD_DIR        = 25;
+const uint8_t REL_SPEED_BAJA     = 33;
+const uint8_t REL_SPEED_MEDIA    = 32;
+const uint8_t REL_SPEED_ALTA     = 13;
+// ======================================================
 
 // ====== INPUT PINS ======
 const uint8_t PIN_EMERGENCY    = 35;
@@ -512,6 +514,9 @@ void handleCommand(JsonObject obj) {
 // ====== SETUP & LOOP ======
 void setup() {
   Serial.begin(115200);
+
+  Serial.println(F("[PINMAP] Q1=21 Q2=19 Q3=18 Q4=5 COLD=17 HOT=16 DRAIN=22 DOOR=23"));
+  Serial.println(F("[PINMAP] FWD=14 REV=27 RUN=26 DIR=25 SLOW=33 MED=32 FAST=13 BUZ=4"));
 
   const uint8_t outputs[] = {
     REL_BUZZER,

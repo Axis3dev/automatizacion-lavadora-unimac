@@ -68,6 +68,64 @@ class KeyboardFrame(ttk.Frame):
             e.insert("insert", char); e.focus_set()
 
 
+class ScrollFrame(ttk.Frame):
+    """Frame desplazable vertical con Canvas+Scrollbar que aloja un interior ttk.Frame."""
+
+    def __init__(self, master, **kw):
+        super().__init__(master, **kw)
+        self.canvas = tk.Canvas(self, highlightthickness=0)
+        self.vsb = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
+        self.canvas.configure(yscrollcommand=self.vsb.set)
+
+        self.inner = ttk.Frame(self.canvas)
+        self.inner_id = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
+
+        self.canvas.grid(row=0, column=0, sticky="nsew")
+        self.vsb.grid(row=0, column=1, sticky="ns")
+        self.rowconfigure(0, weight=1)
+        self.columnconfigure(0, weight=1)
+
+        self.inner.bind("<Configure>", self._on_inner_configure)
+        self.canvas.bind("<Configure>", self._on_canvas_configure)
+
+        self._bind_mousewheel(self.canvas)
+
+    def _on_inner_configure(self, _):
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+
+    def _on_canvas_configure(self, event):
+        self.canvas.itemconfig(self.inner_id, width=event.width)
+
+    def _bind_mousewheel(self, widget):
+        widget.bind_all("<MouseWheel>", self._on_wheel)
+        widget.bind_all("<Button-4>", self._on_wheel)
+        widget.bind_all("<Button-5>", self._on_wheel)
+
+    def _on_wheel(self, event):
+        if event.num == 4:
+            self.canvas.yview_scroll(-3, "units")
+        elif event.num == 5:
+            self.canvas.yview_scroll(3, "units")
+        else:
+            delta = int(-1 * (event.delta / 40))
+            self.canvas.yview_scroll(delta, "units")
+
+    def scroll_to_bottom(self):
+        self.update_idletasks()
+        self.canvas.yview_moveto(1.0)
+
+    def see(self, widget: tk.Widget):
+        try:
+            self.update_idletasks()
+            inner_height = max(1, self.inner.winfo_height())
+            canvas_height = max(1, self.canvas.winfo_height())
+            widget_y = widget.winfo_y()
+            frac = widget_y / max(1, inner_height - canvas_height)
+            self.canvas.yview_moveto(min(max(frac, 0.0), 1.0))
+        except Exception:
+            pass
+
+
 class SettingsDialog(tk.Toplevel):
     BAUDS = [9600, 19200, 38400, 57600, 115200, 250000]
 
@@ -75,6 +133,10 @@ class SettingsDialog(tk.Toplevel):
                  on_save: Callable[[Optional[str], Optional[int], Dict[str,int], Dict[str,int], Dict[str,int], int], None]):
         super().__init__(master)
         self.title("Configuración"); self.attributes("-fullscreen", True); self.transient(master)
+        try:
+            self.tk.call('tk', 'scaling', 1.0)
+        except Exception:
+            pass
         self.serial = serial; self.on_save = on_save
         self.CFG = getattr(master, "CFG", {})
 
@@ -124,8 +186,17 @@ class SettingsDialog(tk.Toplevel):
             pause_def = 2
         self.var_motor_pause = tk.StringVar(value=str(max(0, pause_def)))
 
-        root = ttk.Frame(self, padding=12); root.pack(fill="both", expand=True)
-        main = ttk.Frame(root); main.pack(fill="both", expand=True, pady=(0,8))
+        root = ttk.Frame(self, padding=12)
+        root.pack(fill="both", expand=True)
+        root.rowconfigure(0, weight=1)
+        root.rowconfigure(1, weight=0)
+        root.columnconfigure(0, weight=1)
+
+        scroll = ScrollFrame(root)
+        scroll.grid(row=0, column=0, sticky="nsew", pady=(0, 8))
+        self._scroll = scroll
+
+        main = scroll.inner
         main.columnconfigure(0, weight=1); main.columnconfigure(1, weight=1)
 
         # Comunicación
@@ -211,11 +282,13 @@ class SettingsDialog(tk.Toplevel):
         sysf.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0,8))
         ttk.Button(sysf, text="Apagar sistema", command=self._close_app).pack(side="left", padx=(0,8), pady=(4,4))
 
-        bottom = ttk.Frame(root); bottom.pack(fill="x")
+        bottom = ttk.Frame(root)
+        bottom.grid(row=1, column=0, sticky="ew")
         ttk.Button(bottom, text="Cancelar", command=self._on_cancel).pack(side="right", padx=(0,8))
         ttk.Button(bottom, text="Guardar", command=self._on_save).pack(side="right", padx=(0,8))
 
-        kbwrap = ttk.Frame(root); kbwrap.pack(fill="x", pady=(6,0))
+        kbwrap = ttk.Frame(main)
+        kbwrap.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(6,0))
         self._focused_entry: Optional[tk.Entry] = None
         self.kb_num = KeyboardFrame(kbwrap, mode="numeric", title="Teclado numérico",
                                     getter=lambda: self._focused_entry, scale=0.95)
@@ -228,7 +301,18 @@ class SettingsDialog(tk.Toplevel):
     # teclado
     def _show_kb(self, entry: tk.Entry):
         self._focused_entry = entry
-        self.kb_num.pack(fill="x"); self.kb_num.lift()
+        try:
+            self.kb_num.pack(fill="x")
+        except Exception:
+            pass
+        try:
+            self.kb_num.lift()
+        except Exception:
+            pass
+        try:
+            self.after(10, self._scroll.scroll_to_bottom)
+        except Exception:
+            pass
     def _hide_kb(self):
         try: self.kb_num.pack_forget()
         except Exception: pass
