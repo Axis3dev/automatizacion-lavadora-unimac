@@ -60,6 +60,7 @@ class SerialConn:
         self._on_json: Optional[Callable[[dict], None]] = None
         self._reader_thread: Optional[threading.Thread] = None
         self._reader_stop: Optional[threading.Event] = None
+        self.status: dict = {"door_closed": None}
 
     # ------------------------------- utilidades -------------------------------
     def list_ports(self) -> Iterable[str]:
@@ -122,6 +123,7 @@ class SerialConn:
             ser = self._serial
             self._serial = None
             self.port_name = None
+        self.status["door_closed"] = None
         if ser:
             try:
                 ser.close()
@@ -219,6 +221,12 @@ class SerialConn:
                     obj = json.loads(line)
                 except json.JSONDecodeError:
                     continue
+                if isinstance(obj, dict) and obj.get("event") == "door":
+                    if "closed" in obj:
+                        self.status["door_closed"] = bool(obj.get("closed"))
+                    else:
+                        self.status["door_closed"] = None
+                    self.status["door_ts"] = time.time()
                 callback = self._on_json
                 if callback:
                     try:
@@ -260,6 +268,7 @@ class CommWatcher(threading.Thread):
         self._stop = threading.Event()
         self._last_connected = self.serial.is_connected()
         self._last_port = self.serial.port_name
+        self._last_door_poll = 0.0
 
     # ------------------------------ utilidades --------------------------------
     def _emit(self, callback: Optional[Callable], *args) -> None:
@@ -323,17 +332,26 @@ class CommWatcher(threading.Thread):
                     if not self._last_connected:
                         self._last_connected = True
                         self._last_port = current_port
+                        self._last_door_poll = 0.0
                         if current_port:
                             self._emit(self._on_connect, current_port)
+                    now = time.time()
+                    if now - self._last_door_poll >= 1.5:
+                        if self.serial.send_json({"cmd": "door?"}):
+                            self._last_door_poll = now
+                        else:
+                            self._last_door_poll = now
                 else:
                     if self._last_connected:
                         self._last_connected = False
                         self._last_port = None
                         self._emit(self._on_disconnect)
+                        self._last_door_poll = 0.0
 
                     if self._attempt_reconnect(available_ports):
                         self._last_connected = True
                         self._last_port = self.serial.port_name
+                        self._last_door_poll = 0.0
                         if self._last_port:
                             self._emit(self._on_connect, self._last_port)
             except Exception:

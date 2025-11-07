@@ -1,9 +1,8 @@
 # -*- coding: utf-8 -*-
 import os
-import time
 import tkinter as tk
 import tkinter.font as tkfont
-from tkinter import ttk
+from tkinter import ttk, messagebox
 from typing import Optional, Dict
 
 try:
@@ -125,12 +124,8 @@ class WasherUI(tk.Tk):
         }
 
         # Estado puerta / control ejecución
-        self.door_closed = False
+        self.door_state: Optional[bool] = None
         self.door_var = tk.StringVar(value="Puerta: —")
-        self._last_door_event = 0.0
-        self._last_door_query = 0.0
-        self._door_alert: Optional[tk.Toplevel] = None
-        self._door_alert_pending = False
         self.run_btn_text = tk.StringVar(value="▶  Ejecutar")
         self._run_btn_default_text = self.run_btn_text.get()
         self._run_btn_normal_foreground = ""
@@ -147,6 +142,7 @@ class WasherUI(tk.Tk):
         self._latched_total_steps: int = 0
 
         self._build_ui()
+        self._apply_door_state(None)
         self._load_cycle_list()
         self.after(0, self._cache_run_button_size)
         self._sync_run_button_state()
@@ -282,13 +278,12 @@ class WasherUI(tk.Tk):
 
     def _update_comm_panel_periodic(self):
         self._update_comm_panel_now()
-        now = time.time()
-        if self.serial.is_connected():
-            should_query = (now - self._last_door_event > 2.0) and (now - self._last_door_query > 1.0)
-            if should_query:
-                payload = {"cmd": "query_door"}
-                self.serial.send_json(payload)
-                self._last_door_query = now
+        try:
+            door = self.serial.status.get("door_closed")
+        except Exception:
+            door = None
+        if door is not self.door_state:
+            self._apply_door_state(door)
         self.after(self.COMM_UI_MS, self._update_comm_panel_periodic)
 
     def _send_event(self, event: str, **kw): self.serial.send_json({"event": event, **kw})
@@ -310,22 +305,9 @@ class WasherUI(tk.Tk):
             return
         event = data.get("event")
         if event == "door":
-            closed = bool(data.get("closed"))
-            self.door_closed = closed
-            now = time.time()
-            self._last_door_event = now
-            self._last_door_query = now
-            self.door_var.set("Puerta: Cerrada" if closed else "Puerta: Abierta")
-            try:
-                self.lbl_door.configure(foreground="#27ae60" if closed else "#e74c3c")
-            except Exception:
-                pass
-            if not closed:
-                self._door_alert_pending = True
-                if self.executor.state in (Executor.RUNNING, Executor.PAUSED, Executor.HOLD):
-                    self._stop_execution()
-                self._alert_puerta_abierta()
-            self._sync_run_button_state()
+            closed_val = data.get("closed")
+            closed_state = None if closed_val is None else bool(closed_val)
+            self._apply_door_state(closed_state)
         elif event == "blocked":
             if data.get("reason") == "door_open":
                 self.toast("Operación bloqueada: puerta abierta.")
@@ -461,37 +443,42 @@ class WasherUI(tk.Tk):
         pct = max(0,min(100,int(done*100/self.current_cycle_total)))
         self.pb_var.set(pct); self.pb_pct.config(text=f"{pct}%")
 
+    def _apply_door_state(self, closed: Optional[bool]) -> None:
+        state = closed if isinstance(closed, bool) else None
+        self.door_state = state
+        if state is None:
+            self.door_var.set("Puerta: —")
+            color = "#95a5a6"
+        else:
+            self.door_var.set("Puerta: Cerrada" if state else "Puerta: Abierta")
+            color = "#27ae60" if state else "#e74c3c"
+        try:
+            self.lbl_door.configure(foreground=color)
+        except Exception:
+            pass
+
+        if state is False and self.executor.state in (Executor.RUNNING, Executor.PAUSED, Executor.HOLD):
+            self._stop_execution()
+            try:
+                self.toast("⚠ Puerta abierta: ciclo detenido.")
+            except Exception:
+                messagebox.showwarning("Puerta abierta", "Ciclo detenido por seguridad.")
+
+        self._sync_run_button_state()
+
     def _sync_run_button_state(self):
         if not getattr(self, "btn_run", None):
             return
-        if not self.door_closed:
-            self.run_btn_text.set("Cerrar puerta para continuar")
-            try:
-                self.btn_run.configure(state="disabled")
-            except Exception:
-                pass
-            try:
-                self.btn_run.configure(foreground="#e57373")
-            except Exception:
-                pass
-            return
-        if self._door_alert_pending:
-            self.run_btn_text.set(self._run_btn_default_text)
-            try:
-                self.btn_run.configure(state="disabled")
-            except Exception:
-                pass
-            try:
-                self.btn_run.configure(foreground=self._run_btn_normal_foreground or "")
-            except Exception:
-                pass
-            return
-        desired_state = "disabled" if self.executor.state in (Executor.RUNNING, Executor.PAUSED, Executor.HOLD) else "normal"
+        desired_state = "normal"
+        if self.executor.state in (Executor.RUNNING, Executor.PAUSED, Executor.HOLD):
+            desired_state = "disabled"
+        elif self.door_state is not True:
+            desired_state = "disabled"
+        self.run_btn_text.set(self._run_btn_default_text)
         try:
             self.btn_run.configure(state=desired_state)
         except Exception:
             pass
-        self.run_btn_text.set(self._run_btn_default_text)
         try:
             self.btn_run.configure(foreground=self._run_btn_normal_foreground or "")
         except Exception:
@@ -544,52 +531,19 @@ class WasherUI(tk.Tk):
         except Exception:
             pass
 
-    def _alert_puerta_abierta(self) -> None:
-        if self._door_alert and self._door_alert.winfo_exists():
-            try:
-                self._door_alert.lift()
-                self._door_alert.focus_force()
-            except Exception:
-                pass
-            return
-        self._door_alert_pending = True
-        top = tk.Toplevel(self)
-        self._door_alert = top
-        top.title("Puerta")
-        top.transient(self)
-        top.resizable(False, False)
-        top.attributes("-topmost", True)
-        frame = ttk.Frame(top, padding=12)
-        frame.pack(fill="both", expand=True)
-        ttk.Label(frame, text="Puerta abierta — cierre para continuar", justify="center", wraplength=260).pack(pady=(0,10))
-        ttk.Button(frame, text="Aceptar", command=lambda: self._on_door_alert_accept(top)).pack()
-        top.protocol("WM_DELETE_WINDOW", lambda: self._on_door_alert_accept(top))
-        self._center_window(top)
-        top.after(150, lambda: top.attributes("-topmost", False))
-
-    def _on_door_alert_accept(self, window: tk.Toplevel) -> None:
-        if not self.door_closed:
-            try:
-                window.lift()
-                window.focus_force()
-            except Exception:
-                pass
-            return
-        try:
-            window.destroy()
-        except Exception:
-            pass
-        if self._door_alert is window:
-            self._door_alert = None
-        self._door_alert_pending = False
-        self._sync_run_button_state()
-
     # ejecución
     def _start_execution(self):
         if self.executor.state in (Executor.RUNNING, Executor.PAUSED, Executor.HOLD):
             self.toast("Ya hay un ciclo en ejecución."); return
-        if not self.door_closed:
-            self._alert_puerta_abierta()
+        try:
+            door_status = self.serial.status.get("door_closed")
+        except Exception:
+            door_status = self.door_state
+        if door_status is not True:
+            try:
+                self.toast("Cierra la puerta para continuar.")
+            except Exception:
+                messagebox.showwarning("Puerta abierta", "Cierra la puerta para continuar.")
             return
         if not self.selected_cycle:
             self.toast("Selecciona un ciclo primero."); return
@@ -750,9 +704,7 @@ class WasherUI(tk.Tk):
             if hasattr(self.executor, "on_serial_reconnected"):
                 self.executor.on_serial_reconnected()
             if self.serial.is_connected():
-                now = time.time()
-                self.serial.send_json({"cmd": "query_door"})
-                self._last_door_query = now
+                self.serial.send_json({"cmd": "door?"})
         self.after(0, _cb)
 
     def _on_comm_disconnected(self):
@@ -762,6 +714,7 @@ class WasherUI(tk.Tk):
             self._update_comm_panel_now()
             if was_connected:
                 self.toast("Dispositivo desconectado")
+            self._apply_door_state(None)
         self.after(0, _cb)
 
     def _on_close(self):

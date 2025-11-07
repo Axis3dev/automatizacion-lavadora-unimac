@@ -29,7 +29,15 @@ const uint8_t PIN_EMERGENCY_STOP = 35;
 const uint8_t PIN_VFD_FAULT = 34;
 const uint8_t PIN_RES_IN1 = 0;
 const uint8_t PIN_RES_IN2 = 2;
-const uint8_t PIN_DOOR_SW = 15;  // LOW = cerrada
+
+// --- Puerta ---
+const uint8_t IN_DOOR = 15;  // switch puerta (NC -> a GND cuando cerrada)
+bool doorClosed = false;
+bool lastDoorClosed = false;
+unsigned long lastDoorReportMs = 0;
+bool doorSampleClosed = false;
+uint32_t doorDebounceAt = 0;
+const uint32_t DOOR_DEBOUNCE_MS = 40;
 
 struct TimedPin {
   uint8_t pin;
@@ -49,10 +57,6 @@ DrainTimer drainTask = {false, true, 0};
 
 bool emergencyLatched = false;
 bool vfdFaultLatched = false;
-bool doorSampleClosed = true;
-bool lastDoorClosed = true;
-uint32_t doorDebounceAt = 0;
-const uint32_t DOOR_DEBOUNCE_MS = 40;
 
 void sendJson(const JsonDocument &doc) {
   serializeJson(doc, Serial);
@@ -79,7 +83,7 @@ void sendStatus(const char *status) {
 void sendDoorState() {
   StaticJsonDocument<96> doc;
   doc["event"] = "door";
-  doc["closed"] = lastDoorClosed;
+  doc["closed"] = doorClosed;
   sendJson(doc);
 }
 
@@ -94,7 +98,9 @@ void sendBlocked(const char *name) {
 }
 
 bool ensureDoorClosed(const char *name) {
-  if (lastDoorClosed) {
+  doorClosed = (digitalRead(IN_DOOR) == LOW);
+  doorSampleClosed = doorClosed;
+  if (doorClosed) {
     return true;
   }
   sendBlocked(name);
@@ -344,12 +350,14 @@ void setup() {
   pinMode(PIN_VFD_FAULT, INPUT);
   pinMode(PIN_RES_IN1, INPUT);
   pinMode(PIN_RES_IN2, INPUT);
-  pinMode(PIN_DOOR_SW, INPUT_PULLUP);
+  pinMode(IN_DOOR, INPUT_PULLUP);
 
   delay(20);
-  doorSampleClosed = (digitalRead(PIN_DOOR_SW) == LOW);
-  lastDoorClosed = doorSampleClosed;
+  doorSampleClosed = (digitalRead(IN_DOOR) == LOW);
+  doorClosed = doorSampleClosed;
+  lastDoorClosed = doorClosed;
   doorDebounceAt = millis();
+  lastDoorReportMs = millis();
 
   for (TimedPin &task : chemTasks) {
     task.active = false;
@@ -377,7 +385,15 @@ void loop() {
       if (!err) {
         if (doc.containsKey("cmd")) {
           const char *cmd = doc["cmd"] | "";
-          if (strcmp(cmd, "query_door") == 0) {
+          if (strcmp(cmd, "door?") == 0) {
+            doorClosed = (digitalRead(IN_DOOR) == LOW);
+            doorSampleClosed = doorClosed;
+            lastDoorReportMs = millis();
+            sendDoorState();
+          } else if (strcmp(cmd, "query_door") == 0) {
+            doorClosed = (digitalRead(IN_DOOR) == LOW);
+            doorSampleClosed = doorClosed;
+            lastDoorReportMs = millis();
             sendDoorState();
           }
         } else if (doc.containsKey("event")) {
@@ -389,14 +405,20 @@ void loop() {
 
   uint32_t now = millis();
 
-  bool closedRaw = (digitalRead(PIN_DOOR_SW) == LOW);
+  bool closedRaw = (digitalRead(IN_DOOR) == LOW);
   if (closedRaw != doorSampleClosed) {
     doorSampleClosed = closedRaw;
     doorDebounceAt = now;
-  } else if ((now - doorDebounceAt) > DOOR_DEBOUNCE_MS && closedRaw != lastDoorClosed) {
-    lastDoorClosed = closedRaw;
+  } else if ((now - doorDebounceAt) > DOOR_DEBOUNCE_MS && closedRaw != doorClosed) {
+    doorClosed = closedRaw;
+  }
+
+  bool changed = doorClosed != lastDoorClosed;
+  if (changed || (now - lastDoorReportMs) > 1000) {
+    lastDoorReportMs = now;
+    lastDoorClosed = doorClosed;
     sendDoorState();
-    if (!lastDoorClosed) {
+    if (changed && !doorClosed) {
       allSafeOff();
     }
   }
