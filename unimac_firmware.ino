@@ -26,7 +26,7 @@ const uint8_t PIN_EMERGENCY    = 35;
 const uint8_t PIN_VFD_FAULT    = 34;
 const uint8_t PIN_RES_IN1      = 0;
 const uint8_t PIN_RES_IN2      = 2;
-const uint8_t PIN_RES_IN3      = 15;
+const uint8_t PIN_DOOR_SW      = 15;  // LOW = cerrada
 
 // ====== TIMERS ======
 bool fillColdActive = false;
@@ -46,6 +46,11 @@ uint32_t buzzerUntil = 0;
 
 String speedNivel = "medio";
 
+bool doorSampleClosed = true;
+bool lastDoorClosed = true;
+uint32_t doorDebounceAt = 0;
+const uint32_t DOOR_DEBOUNCE_MS = 40;
+
 // ====== HELPERS ======
 void sendJson(const JsonDocument &doc) {
   serializeJson(doc, Serial);
@@ -56,6 +61,31 @@ void sendAck(const char *cmd) {
   StaticJsonDocument<96> doc;
   doc["ack"] = cmd;
   sendJson(doc);
+}
+
+void sendDoorState() {
+  StaticJsonDocument<96> doc;
+  doc["event"] = "door";
+  doc["closed"] = lastDoorClosed;
+  sendJson(doc);
+}
+
+void sendBlocked(const char *cmd) {
+  StaticJsonDocument<160> doc;
+  doc["event"] = "blocked";
+  doc["reason"] = "door_open";
+  if (cmd && cmd[0] != '\0') {
+    doc["cmd"] = cmd;
+  }
+  sendJson(doc);
+}
+
+bool ensureDoorClosed(const char *cmd) {
+  if (lastDoorClosed) {
+    return true;
+  }
+  sendBlocked(cmd);
+  return false;
 }
 
 void allSafeOff();
@@ -212,6 +242,7 @@ void allSafeOff() {
     stopChem(i);
   }
   drainSet(true);   // open NA valve
+  drainTimerActive = false;
   digitalWrite(REL_DOOR_LOCK, LOW);
   buzzerOff();
 }
@@ -219,6 +250,10 @@ void allSafeOff() {
 // ====== COMMAND HANDLERS ======
 void handleDoor(JsonObject obj) {
   bool lock = obj.containsKey("lock") ? obj["lock"].as<bool>() : false;
+  if (lock && !lastDoorClosed) {
+    sendBlocked("door");
+    return;
+  }
   doorLock(lock);
 
   StaticJsonDocument<128> ack;
@@ -481,25 +516,51 @@ void handleLegacyBeep(JsonObject obj) {
 
 void handleCommand(JsonObject obj) {
   const char *cmd = obj["cmd"] | "";
-  if (strcmp(cmd, "door") == 0) {
+  if (strcmp(cmd, "query_door") == 0) {
+    sendDoorState();
+  } else if (strcmp(cmd, "door") == 0) {
     handleDoor(obj);
   } else if (strcmp(cmd, "vfd_speed") == 0) {
+    if (!ensureDoorClosed(cmd)) {
+      return;
+    }
     handleVfdSpeed(obj);
   } else if (strcmp(cmd, "motor") == 0) {
+    if (!ensureDoorClosed(cmd)) {
+      return;
+    }
     handleMotor(obj);
   } else if (strcmp(cmd, "drain") == 0) {
+    if (!ensureDoorClosed(cmd)) {
+      return;
+    }
     handleDrain(obj);
   } else if (strcmp(cmd, "fill") == 0) {
+    if (!ensureDoorClosed(cmd)) {
+      return;
+    }
     handleFill(obj);
   } else if (strcmp(cmd, "chem") == 0) {
+    if (!ensureDoorClosed(cmd)) {
+      return;
+    }
     handleChem(obj);
   } else if (strcmp(cmd, "buzzer") == 0) {
     handleBuzzer(obj);
   } else if (strcmp(cmd, "out") == 0) {
+    if (!ensureDoorClosed(cmd)) {
+      return;
+    }
     handleLegacyOut(obj);
   } else if (strcmp(cmd, "dose") == 0) {
+    if (!ensureDoorClosed(cmd)) {
+      return;
+    }
     handleLegacyDose(obj);
   } else if (strcmp(cmd, "vfd") == 0) {
+    if (!ensureDoorClosed(cmd)) {
+      return;
+    }
     handleLegacyVfd(obj);
   } else if (strcmp(cmd, "beep") == 0) {
     handleLegacyBeep(obj);
@@ -546,10 +607,17 @@ void setup() {
   pinMode(PIN_VFD_FAULT, INPUT);
   pinMode(PIN_RES_IN1, INPUT);
   pinMode(PIN_RES_IN2, INPUT);
-  pinMode(PIN_RES_IN3, INPUT);
+  pinMode(PIN_DOOR_SW, INPUT_PULLUP);
+
+  delay(20);
+  doorSampleClosed = (digitalRead(PIN_DOOR_SW) == LOW);
+  lastDoorClosed = doorSampleClosed;
+  doorDebounceAt = millis();
 
   allSafeOff();
   setSpeedPresets(speedNivel);
+
+  sendDoorState();
 
   StaticJsonDocument<48> boot;
   boot["boot"] = "ok";
@@ -570,6 +638,18 @@ void loop() {
   }
 
   uint32_t now = millis();
+
+  bool closedRaw = (digitalRead(PIN_DOOR_SW) == LOW);
+  if (closedRaw != doorSampleClosed) {
+    doorSampleClosed = closedRaw;
+    doorDebounceAt = now;
+  } else if ((now - doorDebounceAt) > DOOR_DEBOUNCE_MS && closedRaw != lastDoorClosed) {
+    lastDoorClosed = closedRaw;
+    sendDoorState();
+    if (!lastDoorClosed) {
+      allSafeOff();
+    }
+  }
 
   if (fillColdActive && now >= fillColdUntil) {
     digitalWrite(REL_WATER_FRIA, LOW);

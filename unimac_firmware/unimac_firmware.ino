@@ -29,7 +29,7 @@ const uint8_t PIN_EMERGENCY_STOP = 35;
 const uint8_t PIN_VFD_FAULT = 34;
 const uint8_t PIN_RES_IN1 = 0;
 const uint8_t PIN_RES_IN2 = 2;
-const uint8_t PIN_RES_IN3 = 15;
+const uint8_t PIN_DOOR_SW = 15;  // LOW = cerrada
 
 struct TimedPin {
   uint8_t pin;
@@ -49,6 +49,10 @@ DrainTimer drainTask = {false, true, 0};
 
 bool emergencyLatched = false;
 bool vfdFaultLatched = false;
+bool doorSampleClosed = true;
+bool lastDoorClosed = true;
+uint32_t doorDebounceAt = 0;
+const uint32_t DOOR_DEBOUNCE_MS = 40;
 
 void sendJson(const JsonDocument &doc) {
   serializeJson(doc, Serial);
@@ -70,6 +74,31 @@ void sendStatus(const char *status) {
   StaticJsonDocument<96> doc;
   doc["status"] = status;
   sendJson(doc);
+}
+
+void sendDoorState() {
+  StaticJsonDocument<96> doc;
+  doc["event"] = "door";
+  doc["closed"] = lastDoorClosed;
+  sendJson(doc);
+}
+
+void sendBlocked(const char *name) {
+  StaticJsonDocument<160> doc;
+  doc["event"] = "blocked";
+  doc["reason"] = "door_open";
+  if (name && name[0] != '\0') {
+    doc["cmd"] = name;
+  }
+  sendJson(doc);
+}
+
+bool ensureDoorClosed(const char *name) {
+  if (lastDoorClosed) {
+    return true;
+  }
+  sendBlocked(name);
+  return false;
 }
 
 void allSafeOff();
@@ -251,12 +280,24 @@ void processEvent(JsonDocument &doc) {
   } else if (strcmp(event, "step") == 0) {
     handleStep(doc);
   } else if (strcmp(event, "fill") == 0) {
+    if (!ensureDoorClosed(event)) {
+      return;
+    }
     handleFill(doc);
   } else if (strcmp(event, "chem") == 0) {
+    if (!ensureDoorClosed(event)) {
+      return;
+    }
     handleChem(doc);
   } else if (strcmp(event, "drain") == 0) {
+    if (!ensureDoorClosed(event)) {
+      return;
+    }
     handleDrain(doc);
   } else if (strcmp(event, "motor") == 0) {
+    if (!ensureDoorClosed(event)) {
+      return;
+    }
     handleMotor(doc);
   } else if (strcmp(event, "pause") == 0) {
     handlePause(doc);
@@ -303,7 +344,12 @@ void setup() {
   pinMode(PIN_VFD_FAULT, INPUT);
   pinMode(PIN_RES_IN1, INPUT);
   pinMode(PIN_RES_IN2, INPUT);
-  pinMode(PIN_RES_IN3, INPUT);
+  pinMode(PIN_DOOR_SW, INPUT_PULLUP);
+
+  delay(20);
+  doorSampleClosed = (digitalRead(PIN_DOOR_SW) == LOW);
+  lastDoorClosed = doorSampleClosed;
+  doorDebounceAt = millis();
 
   for (TimedPin &task : chemTasks) {
     task.active = false;
@@ -312,6 +358,8 @@ void setup() {
   }
 
   allSafeOff();
+
+  sendDoorState();
 
   StaticJsonDocument<48> boot;
   boot["boot"] = "ok";
@@ -327,7 +375,12 @@ void loop() {
       StaticJsonDocument<512> doc;
       DeserializationError err = deserializeJson(doc, line);
       if (!err) {
-        if (doc.containsKey("event")) {
+        if (doc.containsKey("cmd")) {
+          const char *cmd = doc["cmd"] | "";
+          if (strcmp(cmd, "query_door") == 0) {
+            sendDoorState();
+          }
+        } else if (doc.containsKey("event")) {
           processEvent(doc);
         }
       }
@@ -335,6 +388,18 @@ void loop() {
   }
 
   uint32_t now = millis();
+
+  bool closedRaw = (digitalRead(PIN_DOOR_SW) == LOW);
+  if (closedRaw != doorSampleClosed) {
+    doorSampleClosed = closedRaw;
+    doorDebounceAt = now;
+  } else if ((now - doorDebounceAt) > DOOR_DEBOUNCE_MS && closedRaw != lastDoorClosed) {
+    lastDoorClosed = closedRaw;
+    sendDoorState();
+    if (!lastDoorClosed) {
+      allSafeOff();
+    }
+  }
 
   if (fillTask.active && now >= fillTask.until) {
     digitalWrite(fillTask.pin, LOW);
@@ -391,6 +456,7 @@ void allSafeOff() {
   for (uint8_t i = 0; i < 4; ++i) {
     chemTasks[i].active = false;
   }
+  drainTask.active = false;
 }
 
 void setDrain(bool open) {
