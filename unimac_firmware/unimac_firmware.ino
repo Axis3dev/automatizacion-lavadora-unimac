@@ -113,11 +113,9 @@ void setFill(const char *temp, bool on);
 void stopFill();
 void doseChem(uint8_t index, uint32_t ms);
 void stopChem(uint8_t index);
-void setMotor(bool run, const char *dir, const char *speed);
+void setMotor(const String &dir);
+void setSpeed(const String &level);
 void setSpeedNone();
-void setSpeedBaja();
-void setSpeedMedia();
-void setSpeedAlta();
 
 uint32_t secondsToMs(JsonVariant value) {
   if (value.isNull()) {
@@ -221,17 +219,14 @@ void handleDrain(JsonDocument &doc) {
 }
 
 void handleMotor(JsonDocument &doc) {
-  bool run = doc["run"].as<bool>();
-  const char *dir = doc["dir"] | "FWD";
-  const char *speed = doc["speed"] | "alto";
-
-  setMotor(run, dir, speed);
+  String dir = doc["dir"] | "STOP";
+  dir.toUpperCase();
+  setMotor(dir);
 
   StaticJsonDocument<192> ack;
-  ack["run"] = run;
   ack["dir"] = dir;
-  ack["speed"] = speed;
   sendAck("motor", ack);
+  Serial.printf("[MOTOR] %s activado\n", dir.c_str());
 }
 
 void handlePause(JsonDocument &doc) {
@@ -346,6 +341,15 @@ void setup() {
     digitalWrite(pin, LOW);
   }
 
+  // Relés de motor/VFD activos en LOW: mantener apagados en reposo
+  digitalWrite(PIN_MOTOR_FWD, HIGH);
+  digitalWrite(PIN_MOTOR_REV, HIGH);
+  digitalWrite(PIN_VFD_RUN, HIGH);
+  digitalWrite(PIN_VFD_DIR, HIGH);
+  digitalWrite(PIN_SPEED_BAJA, HIGH);
+  digitalWrite(PIN_SPEED_MEDIA, HIGH);
+  digitalWrite(PIN_SPEED_ALTA, HIGH);
+
   pinMode(PIN_EMERGENCY_STOP, INPUT);
   pinMode(PIN_VFD_FAULT, INPUT);
   pinMode(PIN_RES_IN1, INPUT);
@@ -395,6 +399,48 @@ void loop() {
             doorSampleClosed = doorClosed;
             lastDoorReportMs = millis();
             sendDoorState();
+          } else if (strcmp(cmd, "motor") == 0) {
+            if (!ensureDoorClosed(cmd)) {
+              continue;
+            }
+            const char *dir = doc["dir"] | "STOP";
+            setMotor(String(dir));
+
+            StaticJsonDocument<160> ack;
+            ack["ack"] = "motor";
+            ack["dir"] = dir;
+            sendJson(ack);
+            Serial.printf("[MOTOR] %s activado\n", dir);
+          } else if (strcmp(cmd, "vfd") == 0) {
+            if (!ensureDoorClosed(cmd)) {
+              continue;
+            }
+            String run = doc["run"] | "off";
+            String dir = doc["dir"] | "cw";
+            String speed = doc["speed"] | "low";
+            run.toLowerCase();
+            dir.toLowerCase();
+            speed.toLowerCase();
+
+            setSpeed(speed);
+            if (run == "on") {
+              if (dir == "ccw") {
+                digitalWrite(PIN_VFD_DIR, HIGH);
+              } else {
+                digitalWrite(PIN_VFD_DIR, LOW);
+              }
+              digitalWrite(PIN_VFD_RUN, LOW);
+            } else {
+              digitalWrite(PIN_VFD_RUN, HIGH);
+            }
+
+            StaticJsonDocument<192> ack;
+            ack["ack"] = "vfd";
+            ack["run"] = run;
+            ack["dir"] = dir;
+            ack["speed"] = speed;
+            sendJson(ack);
+            Serial.printf("[VFD] run=%s dir=%s speed=%s\n", run.c_str(), dir.c_str(), speed.c_str());
           }
         } else if (doc.containsKey("event")) {
           processEvent(doc);
@@ -451,7 +497,8 @@ void loop() {
 
   bool vfdFault = digitalRead(PIN_VFD_FAULT) == HIGH;
   if (vfdFault && !vfdFaultLatched) {
-    setMotor(false, "FWD", "bajo");
+    setMotor("STOP");
+    setSpeedNone();
     sendStatus("vfd_fault");
     vfdFaultLatched = true;
   } else if (!vfdFault) {
@@ -467,10 +514,10 @@ void allSafeOff() {
   digitalWrite(PIN_Q4_BLANQUEADOR, LOW);
   digitalWrite(PIN_V_AF_FRIA, LOW);
   digitalWrite(PIN_V_AC_CALIENTE, LOW);
-  digitalWrite(PIN_MOTOR_FWD, LOW);
-  digitalWrite(PIN_MOTOR_REV, LOW);
-  digitalWrite(PIN_VFD_RUN, LOW);
-  digitalWrite(PIN_VFD_DIR, LOW);
+  digitalWrite(PIN_MOTOR_FWD, HIGH);
+  digitalWrite(PIN_MOTOR_REV, HIGH);
+  digitalWrite(PIN_VFD_RUN, HIGH);
+  digitalWrite(PIN_VFD_DIR, HIGH);
   setSpeedNone();
   setDrain(true);
   digitalWrite(PIN_LOCK_PUERTA, LOW);
@@ -540,56 +587,41 @@ void stopChem(uint8_t index) {
   }
 }
 
-void setMotor(bool run, const char *dir, const char *speed) {
-  if (!run) {
-    digitalWrite(PIN_MOTOR_FWD, LOW);
-    digitalWrite(PIN_MOTOR_REV, LOW);
-    digitalWrite(PIN_VFD_RUN, LOW);
-    setSpeedNone();
-    return;
-  }
-
-  if (strcmp(dir, "REV") == 0) {
-    digitalWrite(PIN_MOTOR_FWD, LOW);
+void setMotor(const String &dirRaw) {
+  String dir = dirRaw;
+  dir.toUpperCase();
+  if (dir == "FWD") {
     digitalWrite(PIN_MOTOR_REV, HIGH);
-    digitalWrite(PIN_VFD_DIR, HIGH);
-  } else {
-    digitalWrite(PIN_MOTOR_REV, LOW);
-    digitalWrite(PIN_MOTOR_FWD, HIGH);
+    digitalWrite(PIN_MOTOR_FWD, LOW);
     digitalWrite(PIN_VFD_DIR, LOW);
-  }
-
-  if (strcmp(speed, "bajo") == 0) {
-    setSpeedBaja();
-  } else if (strcmp(speed, "medio") == 0) {
-    setSpeedMedia();
+    digitalWrite(PIN_VFD_RUN, LOW);
+  } else if (dir == "REV") {
+    digitalWrite(PIN_MOTOR_FWD, HIGH);
+    digitalWrite(PIN_MOTOR_REV, LOW);
+    digitalWrite(PIN_VFD_DIR, HIGH);
+    digitalWrite(PIN_VFD_RUN, LOW);
   } else {
-    setSpeedAlta();
+    digitalWrite(PIN_MOTOR_FWD, HIGH);
+    digitalWrite(PIN_MOTOR_REV, HIGH);
+    digitalWrite(PIN_VFD_RUN, HIGH);
   }
-
-  digitalWrite(PIN_VFD_RUN, HIGH);
 }
 
 void setSpeedNone() {
-  digitalWrite(PIN_SPEED_BAJA, LOW);
-  digitalWrite(PIN_SPEED_MEDIA, LOW);
-  digitalWrite(PIN_SPEED_ALTA, LOW);
-}
-
-void setSpeedBaja() {
   digitalWrite(PIN_SPEED_BAJA, HIGH);
-  digitalWrite(PIN_SPEED_MEDIA, LOW);
-  digitalWrite(PIN_SPEED_ALTA, LOW);
-}
-
-void setSpeedMedia() {
-  digitalWrite(PIN_SPEED_BAJA, LOW);
   digitalWrite(PIN_SPEED_MEDIA, HIGH);
-  digitalWrite(PIN_SPEED_ALTA, LOW);
+  digitalWrite(PIN_SPEED_ALTA, HIGH);
 }
 
-void setSpeedAlta() {
-  digitalWrite(PIN_SPEED_BAJA, LOW);
-  digitalWrite(PIN_SPEED_MEDIA, LOW);
-  digitalWrite(PIN_SPEED_ALTA, HIGH);
+void setSpeed(const String &levelRaw) {
+  String level = levelRaw;
+  level.toLowerCase();
+  setSpeedNone();
+  if (level == "low" || level == "bajo") {
+    digitalWrite(PIN_SPEED_BAJA, LOW);
+  } else if (level == "med" || level == "medio" || level == "media") {
+    digitalWrite(PIN_SPEED_MEDIA, LOW);
+  } else if (level == "high" || level == "alto" || level == "alta") {
+    digitalWrite(PIN_SPEED_ALTA, LOW);
+  }
 }

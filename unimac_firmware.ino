@@ -146,40 +146,63 @@ void scheduleBuzzer(uint32_t durationMs) {
 }
 
 void speedNone() {
-  digitalWrite(REL_SPEED_BAJA, LOW);
-  digitalWrite(REL_SPEED_MEDIA, LOW);
-  digitalWrite(REL_SPEED_ALTA, LOW);
+  digitalWrite(REL_SPEED_BAJA, HIGH);
+  digitalWrite(REL_SPEED_MEDIA, HIGH);
+  digitalWrite(REL_SPEED_ALTA, HIGH);
+}
+
+void setSpeed(const String &levelRaw) {
+  String level = levelRaw;
+  level.toLowerCase();
+  speedNone();
+  if (level == "low" || level == "bajo") {
+    digitalWrite(REL_SPEED_BAJA, LOW);
+  } else if (level == "med" || level == "medio" || level == "media") {
+    digitalWrite(REL_SPEED_MEDIA, LOW);
+  } else if (level == "high" || level == "alto" || level == "alta") {
+    digitalWrite(REL_SPEED_ALTA, LOW);
+  }
 }
 
 void setSpeedPresets(const String &nivel) {
-  speedNone();
-  if (nivel == "bajo") {
-    digitalWrite(REL_SPEED_BAJA, HIGH);
-  } else if (nivel == "medio") {
-    digitalWrite(REL_SPEED_MEDIA, HIGH);
+  String mapped = nivel;
+  mapped.toLowerCase();
+  if (mapped == "bajo") mapped = "low";
+  else if (mapped == "medio") mapped = "med";
+  else if (mapped == "alto") mapped = "high";
+  setSpeed(mapped);
+}
+
+void setMotor(const String &dirRaw) {
+  String dir = dirRaw;
+  dir.toUpperCase();
+  if (dir == "FWD") {
+    digitalWrite(REL_MOTOR_REV, HIGH);
+    digitalWrite(REL_MOTOR_FWD, LOW);
+    digitalWrite(REL_VFD_DIR, LOW);
+    digitalWrite(REL_VFD_RUN, LOW);
+  } else if (dir == "REV") {
+    digitalWrite(REL_MOTOR_FWD, HIGH);
+    digitalWrite(REL_MOTOR_REV, LOW);
+    digitalWrite(REL_VFD_DIR, HIGH);
+    digitalWrite(REL_VFD_RUN, LOW);
   } else {
-    digitalWrite(REL_SPEED_ALTA, HIGH);
+    digitalWrite(REL_MOTOR_FWD, HIGH);
+    digitalWrite(REL_MOTOR_REV, HIGH);
+    digitalWrite(REL_VFD_RUN, HIGH);
   }
 }
 
 void motorFwd() {
-  digitalWrite(REL_MOTOR_REV, LOW);
-  digitalWrite(REL_MOTOR_FWD, HIGH);
-  digitalWrite(REL_VFD_DIR, HIGH);
-  digitalWrite(REL_VFD_RUN, HIGH);
+  setMotor("FWD");
 }
 
 void motorRev() {
-  digitalWrite(REL_MOTOR_FWD, LOW);
-  digitalWrite(REL_MOTOR_REV, HIGH);
-  digitalWrite(REL_VFD_DIR, LOW);
-  digitalWrite(REL_VFD_RUN, HIGH);
+  setMotor("REV");
 }
 
 void motorStop() {
-  digitalWrite(REL_MOTOR_FWD, LOW);
-  digitalWrite(REL_MOTOR_REV, LOW);
-  digitalWrite(REL_VFD_RUN, LOW);
+  setMotor("STOP");
 }
 
 void drainSet(bool open) {
@@ -288,13 +311,8 @@ void handleVfdSpeed(JsonObject obj) {
 void handleMotor(JsonObject obj) {
   String dir = obj["dir"] | "STOP";
   dir.toUpperCase();
-  if (dir == "FWD") {
-    motorFwd();
-  } else if (dir == "REV") {
-    motorRev();
-  } else {
-    motorStop();
-  }
+  setMotor(dir);
+  Serial.printf("[MOTOR] %s activado\n", dir.c_str());
 
   StaticJsonDocument<128> ack;
   ack["ack"] = "motor";
@@ -488,20 +506,21 @@ void handleLegacyVfd(JsonObject obj) {
   dir.toLowerCase();
   speed.toLowerCase();
 
-  String level = "medio";
-  if (speed == "low") level = "bajo";
-  else if (speed == "high") level = "alto";
+  String level = "med";
+  if (speed == "low") level = "low";
+  else if (speed == "high") level = "high";
   speedNivel = level;
-  setSpeedPresets(speedNivel);
+  setSpeed(speedNivel);
 
   if (run == "on") {
     if (dir == "ccw") {
-      motorRev();
+      digitalWrite(REL_VFD_DIR, HIGH);
     } else {
-      motorFwd();
+      digitalWrite(REL_VFD_DIR, LOW);
     }
+    digitalWrite(REL_VFD_RUN, LOW);
   } else {
-    motorStop();
+    digitalWrite(REL_VFD_RUN, HIGH);
   }
 
   StaticJsonDocument<160> ack;
@@ -620,6 +639,15 @@ void setup() {
     pinMode(pin, OUTPUT);
     digitalWrite(pin, LOW);
   }
+
+  // Relés de motor/VFD activos en LOW: dejar apagados en reposo
+  digitalWrite(REL_MOTOR_FWD, HIGH);
+  digitalWrite(REL_MOTOR_REV, HIGH);
+  digitalWrite(REL_VFD_RUN, HIGH);
+  digitalWrite(REL_VFD_DIR, HIGH);
+  digitalWrite(REL_SPEED_BAJA, HIGH);
+  digitalWrite(REL_SPEED_MEDIA, HIGH);
+  digitalWrite(REL_SPEED_ALTA, HIGH);
 
   pinMode(PIN_EMERGENCY, INPUT);
   pinMode(PIN_VFD_FAULT, INPUT);
