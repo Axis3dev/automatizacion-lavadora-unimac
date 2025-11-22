@@ -57,6 +57,10 @@ class SerialConn:
         self._serial: Optional[Serial] = None
         self._lock = threading.Lock()
         self.port_name: Optional[str] = None
+        self._on_json: Optional[Callable[[dict], None]] = None
+        self._reader_thread: Optional[threading.Thread] = None
+        self._reader_stop: Optional[threading.Event] = None
+        self.status: dict = {"door_closed": None}
 
     # ------------------------------- utilidades -------------------------------
     def list_ports(self) -> Iterable[str]:
@@ -102,6 +106,7 @@ class SerialConn:
         CFG["serial_port"] = port
         CFG["baudrate"] = self.baudrate
         save_config(CFG)
+        self._start_reader()
         return True
 
     def connect_auto(self) -> bool:
@@ -118,11 +123,24 @@ class SerialConn:
             ser = self._serial
             self._serial = None
             self.port_name = None
+        self.status["door_closed"] = None
         if ser:
             try:
                 ser.close()
             except Exception:
                 pass
+        reader = self._reader_thread
+        if reader:
+            stop_event = self._reader_stop
+            if stop_event:
+                stop_event.set()
+            if reader is not threading.current_thread():
+                try:
+                    reader.join(timeout=0.5)
+                except Exception:
+                    pass
+            self._reader_thread = None
+            self._reader_stop = None
 
     # -------------------------------- envío ----------------------------------
     def send_json(self, payload: dict) -> bool:
@@ -149,6 +167,72 @@ class SerialConn:
             return False
         print(f"[SER→ESP] {line}")
         return True
+
+    # --------------------------------- JSON RX ---------------------------------
+    def set_on_json(self, cb: Optional[Callable[[dict], None]]) -> None:
+        self._on_json = cb
+
+    def _start_reader(self) -> None:
+        if self._reader_thread and self._reader_thread.is_alive():
+            return
+        self._reader_stop = threading.Event()
+        thread = threading.Thread(target=self._reader_loop, daemon=True)
+        self._reader_thread = thread
+        thread.start()
+
+    def _reader_loop(self) -> None:
+        stop_event = self._reader_stop
+        buffer = bytearray()
+        while stop_event and not stop_event.is_set():
+            with self._lock:
+                ser = self._serial
+            if not ser or not ser.is_open:
+                time.sleep(0.1)
+                continue
+            try:
+                waiting = ser.in_waiting
+            except (SerialException, OSError) as exc:
+                print(f"[SER] in_waiting error: {exc}")
+                self.close()
+                time.sleep(0.2)
+                continue
+            if waiting <= 0:
+                time.sleep(0.05)
+                continue
+            try:
+                data = ser.read(waiting)
+            except (SerialException, OSError) as exc:
+                print(f"[SER] read error: {exc}")
+                self.close()
+                time.sleep(0.2)
+                continue
+            if not data:
+                time.sleep(0.05)
+                continue
+            buffer.extend(data)
+            while b"\n" in buffer:
+                raw_line, _, remainder = buffer.partition(b"\n")
+                buffer = bytearray(remainder)
+                line = raw_line.strip().decode("utf-8", errors="ignore")
+                if not line:
+                    continue
+                print(f"[ESP→SER] {line}")
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(obj, dict) and obj.get("event") == "door":
+                    if "closed" in obj:
+                        self.status["door_closed"] = bool(obj.get("closed"))
+                    else:
+                        self.status["door_closed"] = None
+                    self.status["door_ts"] = time.time()
+                callback = self._on_json
+                if callback:
+                    try:
+                        callback(obj)
+                    except Exception as exc:
+                        print(f"[SER] on_json callback error: {exc}")
 
     # ------------------------------- vigilancia -------------------------------
     def _alive_touch(self) -> bool:
@@ -184,6 +268,7 @@ class CommWatcher(threading.Thread):
         self._stop = threading.Event()
         self._last_connected = self.serial.is_connected()
         self._last_port = self.serial.port_name
+        self._last_door_poll = 0.0
 
     # ------------------------------ utilidades --------------------------------
     def _emit(self, callback: Optional[Callable], *args) -> None:
@@ -247,17 +332,26 @@ class CommWatcher(threading.Thread):
                     if not self._last_connected:
                         self._last_connected = True
                         self._last_port = current_port
+                        self._last_door_poll = 0.0
                         if current_port:
                             self._emit(self._on_connect, current_port)
+                    now = time.time()
+                    if now - self._last_door_poll >= 1.5:
+                        if self.serial.send_json({"cmd": "door?"}):
+                            self._last_door_poll = now
+                        else:
+                            self._last_door_poll = now
                 else:
                     if self._last_connected:
                         self._last_connected = False
                         self._last_port = None
                         self._emit(self._on_disconnect)
+                        self._last_door_poll = 0.0
 
                     if self._attempt_reconnect(available_ports):
                         self._last_connected = True
                         self._last_port = self.serial.port_name
+                        self._last_door_poll = 0.0
                         if self._last_port:
                             self._emit(self._on_connect, self._last_port)
             except Exception:

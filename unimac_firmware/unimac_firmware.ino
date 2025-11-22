@@ -29,7 +29,15 @@ const uint8_t PIN_EMERGENCY_STOP = 35;
 const uint8_t PIN_VFD_FAULT = 34;
 const uint8_t PIN_RES_IN1 = 0;
 const uint8_t PIN_RES_IN2 = 2;
-const uint8_t PIN_RES_IN3 = 15;
+
+// --- Puerta ---
+const uint8_t IN_DOOR = 15;  // switch puerta (NC -> a GND cuando cerrada)
+bool doorClosed = false;
+bool lastDoorClosed = false;
+unsigned long lastDoorReportMs = 0;
+bool doorSampleClosed = false;
+uint32_t doorDebounceAt = 0;
+const uint32_t DOOR_DEBOUNCE_MS = 40;
 
 struct TimedPin {
   uint8_t pin;
@@ -72,17 +80,48 @@ void sendStatus(const char *status) {
   sendJson(doc);
 }
 
+void setRelay(uint8_t pin, bool on) {
+  // on = true  => energiza relé (activo en LOW)
+  // on = false => relé apagado (HIGH)
+  digitalWrite(pin, on ? LOW : HIGH);
+}
+
+void sendDoorState() {
+  StaticJsonDocument<96> doc;
+  doc["event"] = "door";
+  doc["closed"] = doorClosed;
+  sendJson(doc);
+}
+
+void sendBlocked(const char *name) {
+  StaticJsonDocument<160> doc;
+  doc["event"] = "blocked";
+  doc["reason"] = "door_open";
+  if (name && name[0] != '\0') {
+    doc["cmd"] = name;
+  }
+  sendJson(doc);
+}
+
+bool ensureDoorClosed(const char *name) {
+  doorClosed = (digitalRead(IN_DOOR) == LOW);
+  doorSampleClosed = doorClosed;
+  if (doorClosed) {
+    return true;
+  }
+  sendBlocked(name);
+  return false;
+}
+
 void allSafeOff();
 void setDrain(bool open);
 void setFill(const char *temp, bool on);
 void stopFill();
 void doseChem(uint8_t index, uint32_t ms);
 void stopChem(uint8_t index);
-void setMotor(bool run, const char *dir, const char *speed);
+void setMotor(const String &dir);
+void setSpeed(const String &level);
 void setSpeedNone();
-void setSpeedBaja();
-void setSpeedMedia();
-void setSpeedAlta();
 
 uint32_t secondsToMs(JsonVariant value) {
   if (value.isNull()) {
@@ -97,7 +136,7 @@ uint32_t secondsToMs(JsonVariant value) {
 
 void cancelFillTask() {
   if (fillTask.active) {
-    digitalWrite(fillTask.pin, LOW);
+    setRelay(fillTask.pin, false);
     fillTask.active = false;
   }
 }
@@ -186,17 +225,14 @@ void handleDrain(JsonDocument &doc) {
 }
 
 void handleMotor(JsonDocument &doc) {
-  bool run = doc["run"].as<bool>();
-  const char *dir = doc["dir"] | "FWD";
-  const char *speed = doc["speed"] | "alto";
-
-  setMotor(run, dir, speed);
+  String dir = doc["dir"] | "STOP";
+  dir.toUpperCase();
+  setMotor(dir);
 
   StaticJsonDocument<192> ack;
-  ack["run"] = run;
   ack["dir"] = dir;
-  ack["speed"] = speed;
   sendAck("motor", ack);
+  Serial.printf("[MOTOR] %s activado\n", dir.c_str());
 }
 
 void handlePause(JsonDocument &doc) {
@@ -251,12 +287,24 @@ void processEvent(JsonDocument &doc) {
   } else if (strcmp(event, "step") == 0) {
     handleStep(doc);
   } else if (strcmp(event, "fill") == 0) {
+    if (!ensureDoorClosed(event)) {
+      return;
+    }
     handleFill(doc);
   } else if (strcmp(event, "chem") == 0) {
+    if (!ensureDoorClosed(event)) {
+      return;
+    }
     handleChem(doc);
   } else if (strcmp(event, "drain") == 0) {
+    if (!ensureDoorClosed(event)) {
+      return;
+    }
     handleDrain(doc);
   } else if (strcmp(event, "motor") == 0) {
+    if (!ensureDoorClosed(event)) {
+      return;
+    }
     handleMotor(doc);
   } else if (strcmp(event, "pause") == 0) {
     handlePause(doc);
@@ -296,14 +344,21 @@ void setup() {
 
   for (uint8_t pin : outputs) {
     pinMode(pin, OUTPUT);
-    digitalWrite(pin, LOW);
+    setRelay(pin, false);
   }
 
   pinMode(PIN_EMERGENCY_STOP, INPUT);
   pinMode(PIN_VFD_FAULT, INPUT);
   pinMode(PIN_RES_IN1, INPUT);
   pinMode(PIN_RES_IN2, INPUT);
-  pinMode(PIN_RES_IN3, INPUT);
+  pinMode(IN_DOOR, INPUT_PULLUP);
+
+  delay(20);
+  doorSampleClosed = (digitalRead(IN_DOOR) == LOW);
+  doorClosed = doorSampleClosed;
+  lastDoorClosed = doorClosed;
+  doorDebounceAt = millis();
+  lastDoorReportMs = millis();
 
   for (TimedPin &task : chemTasks) {
     task.active = false;
@@ -312,6 +367,8 @@ void setup() {
   }
 
   allSafeOff();
+
+  sendDoorState();
 
   StaticJsonDocument<48> boot;
   boot["boot"] = "ok";
@@ -327,7 +384,62 @@ void loop() {
       StaticJsonDocument<512> doc;
       DeserializationError err = deserializeJson(doc, line);
       if (!err) {
-        if (doc.containsKey("event")) {
+        if (doc.containsKey("cmd")) {
+          const char *cmd = doc["cmd"] | "";
+          if (strcmp(cmd, "door?") == 0) {
+            doorClosed = (digitalRead(IN_DOOR) == LOW);
+            doorSampleClosed = doorClosed;
+            lastDoorReportMs = millis();
+            sendDoorState();
+          } else if (strcmp(cmd, "query_door") == 0) {
+            doorClosed = (digitalRead(IN_DOOR) == LOW);
+            doorSampleClosed = doorClosed;
+            lastDoorReportMs = millis();
+            sendDoorState();
+          } else if (strcmp(cmd, "motor") == 0) {
+            if (!ensureDoorClosed(cmd)) {
+              continue;
+            }
+            const char *dir = doc["dir"] | "STOP";
+            setMotor(String(dir));
+
+            StaticJsonDocument<160> ack;
+            ack["ack"] = "motor";
+            ack["dir"] = dir;
+            sendJson(ack);
+            Serial.printf("[MOTOR] %s activado\n", dir);
+          } else if (strcmp(cmd, "vfd") == 0) {
+            if (!ensureDoorClosed(cmd)) {
+              continue;
+            }
+            String run = doc["run"] | "off";
+            String dir = doc["dir"] | "cw";
+            String speed = doc["speed"] | "low";
+            run.toLowerCase();
+            dir.toLowerCase();
+            speed.toLowerCase();
+
+            setSpeed(speed);
+            if (run == "on") {
+              if (dir == "ccw") {
+                setRelay(PIN_VFD_DIR, true);
+              } else {
+                setRelay(PIN_VFD_DIR, false);
+              }
+              setRelay(PIN_VFD_RUN, true);
+            } else {
+              setRelay(PIN_VFD_RUN, false);
+            }
+
+            StaticJsonDocument<192> ack;
+            ack["ack"] = "vfd";
+            ack["run"] = run;
+            ack["dir"] = dir;
+            ack["speed"] = speed;
+            sendJson(ack);
+            Serial.printf("[VFD] run=%s dir=%s speed=%s\n", run.c_str(), dir.c_str(), speed.c_str());
+          }
+        } else if (doc.containsKey("event")) {
           processEvent(doc);
         }
       }
@@ -336,8 +448,26 @@ void loop() {
 
   uint32_t now = millis();
 
+  bool closedRaw = (digitalRead(IN_DOOR) == LOW);
+  if (closedRaw != doorSampleClosed) {
+    doorSampleClosed = closedRaw;
+    doorDebounceAt = now;
+  } else if ((now - doorDebounceAt) > DOOR_DEBOUNCE_MS && closedRaw != doorClosed) {
+    doorClosed = closedRaw;
+  }
+
+  bool changed = doorClosed != lastDoorClosed;
+  if (changed || (now - lastDoorReportMs) > 1000) {
+    lastDoorReportMs = now;
+    lastDoorClosed = doorClosed;
+    sendDoorState();
+    if (changed && !doorClosed) {
+      allSafeOff();
+    }
+  }
+
   if (fillTask.active && now >= fillTask.until) {
-    digitalWrite(fillTask.pin, LOW);
+    setRelay(fillTask.pin, false);
     fillTask.active = false;
   }
 
@@ -364,7 +494,8 @@ void loop() {
 
   bool vfdFault = digitalRead(PIN_VFD_FAULT) == HIGH;
   if (vfdFault && !vfdFaultLatched) {
-    setMotor(false, "FWD", "bajo");
+    setMotor("STOP");
+    setSpeedNone();
     sendStatus("vfd_fault");
     vfdFaultLatched = true;
   } else if (!vfdFault) {
@@ -373,49 +504,50 @@ void loop() {
 }
 
 void allSafeOff() {
-  digitalWrite(PIN_BUZZER, LOW);
-  digitalWrite(PIN_Q1_DETERGENTE, LOW);
-  digitalWrite(PIN_Q2_QUITAMANCHAS, LOW);
-  digitalWrite(PIN_Q3_SUAVIZANTE, LOW);
-  digitalWrite(PIN_Q4_BLANQUEADOR, LOW);
-  digitalWrite(PIN_V_AF_FRIA, LOW);
-  digitalWrite(PIN_V_AC_CALIENTE, LOW);
-  digitalWrite(PIN_MOTOR_FWD, LOW);
-  digitalWrite(PIN_MOTOR_REV, LOW);
-  digitalWrite(PIN_VFD_RUN, LOW);
-  digitalWrite(PIN_VFD_DIR, LOW);
+  setRelay(PIN_BUZZER, false);
+  setRelay(PIN_Q1_DETERGENTE, false);
+  setRelay(PIN_Q2_QUITAMANCHAS, false);
+  setRelay(PIN_Q3_SUAVIZANTE, false);
+  setRelay(PIN_Q4_BLANQUEADOR, false);
+  setRelay(PIN_V_AF_FRIA, false);
+  setRelay(PIN_V_AC_CALIENTE, false);
+  setRelay(PIN_MOTOR_FWD, false);
+  setRelay(PIN_MOTOR_REV, false);
+  setRelay(PIN_VFD_RUN, false);
+  setRelay(PIN_VFD_DIR, false);
   setSpeedNone();
   setDrain(true);
-  digitalWrite(PIN_LOCK_PUERTA, LOW);
+  setRelay(PIN_LOCK_PUERTA, false);
   fillTask.active = false;
   for (uint8_t i = 0; i < 4; ++i) {
     chemTasks[i].active = false;
   }
+  drainTask.active = false;
 }
 
 void setDrain(bool open) {
-  digitalWrite(PIN_DREN_CERRAR, open ? LOW : HIGH);
+  setRelay(PIN_DREN_CERRAR, !open);
 }
 
 void setFill(const char *temp, bool on) {
   if (strcmp(temp, "fria") == 0) {
-    digitalWrite(PIN_V_AF_FRIA, on ? HIGH : LOW);
+    setRelay(PIN_V_AF_FRIA, on);
     if (on) {
-      digitalWrite(PIN_V_AC_CALIENTE, LOW);
+      setRelay(PIN_V_AC_CALIENTE, false);
       setDrain(false);
     }
   } else if (strcmp(temp, "caliente") == 0) {
-    digitalWrite(PIN_V_AC_CALIENTE, on ? HIGH : LOW);
+    setRelay(PIN_V_AC_CALIENTE, on);
     if (on) {
-      digitalWrite(PIN_V_AF_FRIA, LOW);
+      setRelay(PIN_V_AF_FRIA, false);
       setDrain(false);
     }
   }
 }
 
 void stopFill() {
-  digitalWrite(PIN_V_AF_FRIA, LOW);
-  digitalWrite(PIN_V_AC_CALIENTE, LOW);
+  setRelay(PIN_V_AF_FRIA, false);
+  setRelay(PIN_V_AC_CALIENTE, false);
   fillTask.active = false;
 }
 
@@ -438,7 +570,7 @@ void doseChem(uint8_t index, uint32_t ms) {
   if (pin == 0) {
     return;
   }
-  digitalWrite(pin, HIGH);
+  setRelay(pin, true);
   chemTasks[index].pin = pin;
   chemTasks[index].active = true;
   chemTasks[index].until = millis() + ms;
@@ -447,61 +579,46 @@ void doseChem(uint8_t index, uint32_t ms) {
 void stopChem(uint8_t index) {
   uint8_t pin = chemTasks[index].pin;
   if (chemTasks[index].active && pin != 0) {
-    digitalWrite(pin, LOW);
+    setRelay(pin, false);
     chemTasks[index].active = false;
   }
 }
 
-void setMotor(bool run, const char *dir, const char *speed) {
-  if (!run) {
-    digitalWrite(PIN_MOTOR_FWD, LOW);
-    digitalWrite(PIN_MOTOR_REV, LOW);
-    digitalWrite(PIN_VFD_RUN, LOW);
-    setSpeedNone();
-    return;
-  }
-
-  if (strcmp(dir, "REV") == 0) {
-    digitalWrite(PIN_MOTOR_FWD, LOW);
-    digitalWrite(PIN_MOTOR_REV, HIGH);
-    digitalWrite(PIN_VFD_DIR, HIGH);
+void setMotor(const String &dirRaw) {
+  String dir = dirRaw;
+  dir.toUpperCase();
+  if (dir == "FWD") {
+    setRelay(PIN_MOTOR_REV, false);
+    setRelay(PIN_MOTOR_FWD, true);
+    setRelay(PIN_VFD_DIR, false);
+    setRelay(PIN_VFD_RUN, true);
+  } else if (dir == "REV") {
+    setRelay(PIN_MOTOR_FWD, false);
+    setRelay(PIN_MOTOR_REV, true);
+    setRelay(PIN_VFD_DIR, true);
+    setRelay(PIN_VFD_RUN, true);
   } else {
-    digitalWrite(PIN_MOTOR_REV, LOW);
-    digitalWrite(PIN_MOTOR_FWD, HIGH);
-    digitalWrite(PIN_VFD_DIR, LOW);
+    setRelay(PIN_MOTOR_FWD, false);
+    setRelay(PIN_MOTOR_REV, false);
+    setRelay(PIN_VFD_RUN, false);
   }
-
-  if (strcmp(speed, "bajo") == 0) {
-    setSpeedBaja();
-  } else if (strcmp(speed, "medio") == 0) {
-    setSpeedMedia();
-  } else {
-    setSpeedAlta();
-  }
-
-  digitalWrite(PIN_VFD_RUN, HIGH);
 }
 
 void setSpeedNone() {
-  digitalWrite(PIN_SPEED_BAJA, LOW);
-  digitalWrite(PIN_SPEED_MEDIA, LOW);
-  digitalWrite(PIN_SPEED_ALTA, LOW);
+  setRelay(PIN_SPEED_BAJA, false);
+  setRelay(PIN_SPEED_MEDIA, false);
+  setRelay(PIN_SPEED_ALTA, false);
 }
 
-void setSpeedBaja() {
-  digitalWrite(PIN_SPEED_BAJA, HIGH);
-  digitalWrite(PIN_SPEED_MEDIA, LOW);
-  digitalWrite(PIN_SPEED_ALTA, LOW);
-}
-
-void setSpeedMedia() {
-  digitalWrite(PIN_SPEED_BAJA, LOW);
-  digitalWrite(PIN_SPEED_MEDIA, HIGH);
-  digitalWrite(PIN_SPEED_ALTA, LOW);
-}
-
-void setSpeedAlta() {
-  digitalWrite(PIN_SPEED_BAJA, LOW);
-  digitalWrite(PIN_SPEED_MEDIA, LOW);
-  digitalWrite(PIN_SPEED_ALTA, HIGH);
+void setSpeed(const String &levelRaw) {
+  String level = levelRaw;
+  level.toLowerCase();
+  setSpeedNone();
+  if (level == "low" || level == "bajo") {
+    setRelay(PIN_SPEED_BAJA, true);
+  } else if (level == "med" || level == "medio" || level == "media") {
+    setRelay(PIN_SPEED_MEDIA, true);
+  } else if (level == "high" || level == "alto" || level == "alta") {
+    setRelay(PIN_SPEED_ALTA, true);
+  }
 }

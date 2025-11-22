@@ -62,13 +62,25 @@ class Esp32Controller:
                 pass
 
     def _out(self, target: str, on: int):
+        # on=1 energiza el relé; el hardware real es activo en LOW
         self.send({"cmd": "out", "target": target, "on": 1 if on else 0})
 
     def _dose(self, which: str, seconds: int):
         self.send({"cmd": "dose", "which": which, "seconds": max(0, int(seconds))})
 
+    def _motor(self, dir: str):
+        self.send({"cmd": "motor", "dir": dir})
+
     def _vfd(self, run: str = "off", dir: str = "cw", speed: str = "low"):
-        self.send({"cmd": "vfd", "run": run, "dir": dir, "speed": speed})
+        spd = (speed or "").lower()
+        if spd not in ("low", "med", "high"):
+            if spd in ("medio", "media", "medium"):
+                spd = "med"
+            elif spd in ("alto", "alta"):
+                spd = "high"
+            else:
+                spd = "low"
+        self.send({"cmd": "vfd", "run": run, "dir": dir, "speed": spd})
 
     def _beep(self, ms: int = 120):
         self.send({"cmd": "beep", "ms": int(max(30, ms))})
@@ -115,17 +127,22 @@ class Esp32Controller:
         self._dose(hw_ident, int(max(0, seconds)))
 
     def motor(self, run: bool, direction: str, speed: str):
-        spd = "low"
-        s = (speed or "").lower()
-        if s == "medio":
+        spd = (speed or "").lower()
+        if spd in ("medio", "media", "med", "medium"):
             spd = "med"
-        elif s == "alto":
+        elif spd in ("alto", "alta", "high"):
             spd = "high"
-        dir_map = "cw" if (direction or "").upper() != "REV" else "ccw"
+        else:
+            spd = "low"
+
+        dir_raw = (direction or "").upper()
+        dir_map = "cw" if dir_raw != "REV" else "ccw"
         if run:
             self._vfd(run="on", dir=dir_map, speed=spd)
+            self._motor("REV" if dir_raw == "REV" else "FWD")
         else:
-            self._vfd(run="off")
+            self._vfd(run="off", dir=dir_map, speed=spd)
+            self._motor("STOP")
 
     def close_drain(self):
         self._out("DRAIN", 1)
@@ -165,13 +182,17 @@ class Esp32Controller:
                 self._dose(ident, int(doses.get(ident, 0)))
 
         # Agitación con alternancia
-        spd = "low"
-        v = (velocidad or "").lower()
-        if v == "medio": spd = "med"
-        elif v == "alto": spd = "high"
+        spd = (velocidad or "").lower()
+        if spd in ("medio", "media", "med", "medium"):
+            spd = "med"
+        elif spd in ("alto", "alta", "high"):
+            spd = "high"
+        else:
+            spd = "low"
 
         self._current_dir = "cw"
         self._vfd(run="on", dir=self._current_dir, speed=spd)
+        self._motor("FWD")
         self._beep(70)
 
         alt = max(0, int(self.get_alt_seconds() or 0))
@@ -185,6 +206,7 @@ class Esp32Controller:
         def toggle():
             self._current_dir = "ccw" if self._current_dir == "cw" else "cw"
             self._vfd(run="on", dir=self._current_dir, speed=spd)
+            self._motor("REV" if self._current_dir == "ccw" else "FWD")
             self._agitate_toggle_job = self._after(alt_sec * 1000, toggle)
         self._agitate_toggle_job = self._after(alt_sec * 1000, toggle)
 
@@ -198,7 +220,8 @@ class Esp32Controller:
 
     def _end_step_no_drain(self):
         # Parar agitación y agua/químicos
-        self._vfd(run="off")
+        self._vfd(run="off", dir=self._current_dir, speed=spd)
+        self._motor("STOP")
         self._fill_off()
         self._out("Q1", 0); self._out("Q2", 0); self._out("Q3", 0); self._out("Q4", 0)
         self._beep(100)
@@ -210,18 +233,23 @@ class Esp32Controller:
         self._out("Q1", 0); self._out("Q2", 0); self._out("Q3", 0); self._out("Q4", 0)
         self._out("DRAIN", 0)
 
-        spd = "high"
-        v = (velocidad or "").lower()
-        if v == "medio": spd = "med"
-        elif v == "bajo": spd = "low"
+        spd = (velocidad or "").lower()
+        if spd in ("medio", "media", "med", "medium"):
+            spd = "med"
+        elif spd in ("bajo", "baja", "low"):
+            spd = "low"
+        else:
+            spd = "high"
 
         self._vfd(run="on", dir="cw", speed=spd)
+        self._motor("FWD")
         self._beep(80)
 
         self._after(int(max(0, duracion)) * 1000, self._end_spin)
 
     def _end_spin(self):
-        self._vfd(run="off")
+        self._vfd(run="off", dir="cw", speed=spd)
+        self._motor("STOP")
         self._beep(120)
 
     # ---- Drenaje público para main ----

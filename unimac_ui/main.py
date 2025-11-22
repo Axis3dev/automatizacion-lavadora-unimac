@@ -2,7 +2,7 @@
 import os
 import tkinter as tk
 import tkinter.font as tkfont
-from tkinter import ttk
+from tkinter import ttk, messagebox
 from typing import Optional, Dict
 
 try:
@@ -68,6 +68,7 @@ class WasherUI(tk.Tk):
             tk_after=self.after,
         )
         self.comm_watcher.start()
+        self.serial.set_on_json(self._on_serial_json)
 
         self.CFG = CFG
 
@@ -122,6 +123,14 @@ class WasherUI(tk.Tk):
             "alt_pause_s": _cfg_int(globals_cfg.get("motor_pause_seconds", pause_default), 0),
         }
 
+        # Estado puerta / control ejecución
+        self.door_state: Optional[bool] = None
+        self.door_var = tk.StringVar(value="Puerta: —")
+        self.run_btn_text = tk.StringVar(value="▶  Ejecutar")
+        self._run_btn_default_text = self.run_btn_text.get()
+        self._run_btn_normal_foreground = ""
+        self._run_btn_holder: Optional[ttk.Frame] = None
+
         # Estado UI
         self._settings_win = None
         self._editor_win = None
@@ -133,7 +142,10 @@ class WasherUI(tk.Tk):
         self._latched_total_steps: int = 0
 
         self._build_ui()
+        self._apply_door_state(None)
         self._load_cycle_list()
+        self.after(0, self._cache_run_button_size)
+        self._sync_run_button_state()
 
         self.after(self.TICK_MS, self._loop_logic)
         self.after(self.COMM_UI_MS, self._update_comm_panel_periodic)
@@ -204,8 +216,11 @@ class WasherUI(tk.Tk):
         self.details.pack(fill="both", expand=True)
 
         controls = ttk.Frame(root); controls.pack(fill="x", pady=8)
-        self.btn_run = ttk.Button(controls, text="▶  Ejecutar", style="Ctrl.TButton", command=self._start_execution)
-        self.btn_run.pack(side="left", padx=(0,8))
+        run_holder = ttk.Frame(controls)
+        run_holder.pack(side="left", padx=(0,8))
+        self._run_btn_holder = run_holder
+        self.btn_run = ttk.Button(run_holder, textvariable=self.run_btn_text, style="Ctrl.TButton", command=self._start_execution)
+        self.btn_run.pack()
         self.btn_pause = ttk.Button(controls, text="⏸  Pausar", style="Ctrl.TButton",
                                     command=self._pause_resume, state="disabled")
         self.btn_pause.pack(side="left", padx=(0,8))
@@ -217,11 +232,35 @@ class WasherUI(tk.Tk):
         ttk.Label(footer, textvariable=self.current_step_name, font=("Segoe UI", 12 if self.is_720p else 14, "bold")).pack(anchor="w", pady=(0,2))
         self.status = tk.Label(footer, text="Estado actual: Inactivo", font=("Segoe UI", 12 if self.is_720p else 14, "bold"), anchor="w")
         self.status.pack(side="left", padx=(0,10))
+        self.lbl_door = ttk.Label(footer, textvariable=self.door_var, font=self.status.cget("font"))
+        self.lbl_door.pack(side="left", padx=(0,10))
+        try:
+            self.lbl_door.configure(foreground="#95a5a6")
+        except Exception:
+            pass
         self.pb_var = tk.IntVar(value=0)
         self.pb = ttk.Progressbar(footer, variable=self.pb_var, maximum=100, style="Green.Horizontal.TProgressbar")
         self.pb.pack(side="left", fill="x", expand=True)
         self.pb_pct = ttk.Label(footer, text="0%", font=("Segoe UI", 11 if self.is_720p else 12, "bold"))
         self.pb_pct.pack(side="left", padx=8)
+
+    def _cache_run_button_size(self):
+        holder = getattr(self, "_run_btn_holder", None)
+        if not holder or not getattr(self, "btn_run", None):
+            return
+        try:
+            self.update_idletasks()
+            width = max(1, self.btn_run.winfo_reqwidth())
+            height = max(1, self.btn_run.winfo_reqheight())
+            holder.configure(width=width, height=height)
+            holder.pack_propagate(False)
+            if not self._run_btn_normal_foreground:
+                try:
+                    self._run_btn_normal_foreground = self.btn_run.cget("foreground") or ""
+                except Exception:
+                    self._run_btn_normal_foreground = ""
+        except Exception:
+            pass
 
     # scroll
     def _scroll_once(self, direction: str): self.listbox.yview_scroll(-3 if direction=="up" else 3, "units")
@@ -238,7 +277,14 @@ class WasherUI(tk.Tk):
         self.comm_port_var.set(self.serial.port_name or (self.serial.preferred_port or "—"))
 
     def _update_comm_panel_periodic(self):
-        self._update_comm_panel_now(); self.after(self.COMM_UI_MS, self._update_comm_panel_periodic)
+        self._update_comm_panel_now()
+        try:
+            door = self.serial.status.get("door_closed")
+        except Exception:
+            door = None
+        if door is not self.door_state:
+            self._apply_door_state(door)
+        self.after(self.COMM_UI_MS, self._update_comm_panel_periodic)
 
     def _send_event(self, event: str, **kw): self.serial.send_json({"event": event, **kw})
 
@@ -247,6 +293,26 @@ class WasherUI(tk.Tk):
         if nivel not in ("bajo", "medio", "alto"):
             nivel = "medio"
         self.serial.send_json({"event": "speed", "nivel": nivel})
+
+    def _on_serial_json(self, data: Dict) -> None:
+        if not isinstance(data, dict):
+            return
+        payload = dict(data)
+        self.after(0, lambda d=payload: self._handle_serial_json(d))
+
+    def _handle_serial_json(self, data: Dict) -> None:
+        if not isinstance(data, dict):
+            return
+        event = data.get("event")
+        if event == "door":
+            closed_val = data.get("closed")
+            closed_state = None if closed_val is None else bool(closed_val)
+            self._apply_door_state(closed_state)
+        elif event == "blocked":
+            if data.get("reason") == "door_open":
+                self.toast("Operación bloqueada: puerta abierta.")
+            else:
+                self.toast("Operación bloqueada.")
 
     # configuración global normalizada
     @staticmethod
@@ -377,6 +443,47 @@ class WasherUI(tk.Tk):
         pct = max(0,min(100,int(done*100/self.current_cycle_total)))
         self.pb_var.set(pct); self.pb_pct.config(text=f"{pct}%")
 
+    def _apply_door_state(self, closed: Optional[bool]) -> None:
+        state = closed if isinstance(closed, bool) else None
+        self.door_state = state
+        if state is None:
+            self.door_var.set("Puerta: —")
+            color = "#95a5a6"
+        else:
+            self.door_var.set("Puerta: Cerrada" if state else "Puerta: Abierta")
+            color = "#27ae60" if state else "#e74c3c"
+        try:
+            self.lbl_door.configure(foreground=color)
+        except Exception:
+            pass
+
+        if state is False and self.executor.state in (Executor.RUNNING, Executor.PAUSED, Executor.HOLD):
+            self._stop_execution()
+            try:
+                self.toast("⚠ Puerta abierta: ciclo detenido.")
+            except Exception:
+                messagebox.showwarning("Puerta abierta", "Ciclo detenido por seguridad.")
+
+        self._sync_run_button_state()
+
+    def _sync_run_button_state(self):
+        if not getattr(self, "btn_run", None):
+            return
+        desired_state = "normal"
+        if self.executor.state in (Executor.RUNNING, Executor.PAUSED, Executor.HOLD):
+            desired_state = "disabled"
+        elif self.door_state is not True:
+            desired_state = "disabled"
+        self.run_btn_text.set(self._run_btn_default_text)
+        try:
+            self.btn_run.configure(state=desired_state)
+        except Exception:
+            pass
+        try:
+            self.btn_run.configure(foreground=self._run_btn_normal_foreground or "")
+        except Exception:
+            pass
+
     def _on_tick(self, step_idx:int, step_remaining:int, total_remaining:int):
         if self.executor.state in (Executor.RUNNING, Executor.PAUSED, Executor.HOLD):
             cycle = self._latched_cycle or self.selected_cycle
@@ -404,17 +511,40 @@ class WasherUI(tk.Tk):
     def _on_finish(self):
         self.btn_pause.config(state="disabled")
         self.btn_stop.config(state="disabled")
-        self.btn_run.config(state="normal")
         self.pb_var.set(100); self.pb_pct.config(text="100%")
         self.current_step_name.set("—")
         self._latched_cycle = None
         self._latched_total_steps = 0
         self._set_run_ui_lock(False)
+        self._sync_run_button_state()
+
+    def _center_window(self, win: tk.Toplevel) -> None:
+        try:
+            win.update_idletasks()
+            w = win.winfo_reqwidth()
+            h = win.winfo_reqheight()
+            sw = win.winfo_screenwidth()
+            sh = win.winfo_screenheight()
+            x = max(0, (sw - w) // 2)
+            y = max(0, (sh - h) // 2)
+            win.geometry(f"{w}x{h}+{x}+{y}")
+        except Exception:
+            pass
 
     # ejecución
     def _start_execution(self):
         if self.executor.state in (Executor.RUNNING, Executor.PAUSED, Executor.HOLD):
             self.toast("Ya hay un ciclo en ejecución."); return
+        try:
+            door_status = self.serial.status.get("door_closed")
+        except Exception:
+            door_status = self.door_state
+        if door_status is not True:
+            try:
+                self.toast("Cierra la puerta para continuar.")
+            except Exception:
+                messagebox.showwarning("Puerta abierta", "Cierra la puerta para continuar.")
+            return
         if not self.selected_cycle:
             self.toast("Selecciona un ciclo primero."); return
         self._latched_cycle = self.selected_cycle
@@ -427,6 +557,7 @@ class WasherUI(tk.Tk):
         self.btn_run.config(state="disabled")
         self.btn_pause.config(state="normal", text="⏸  Pausar")
         self.btn_stop.config(state="normal")
+        self._sync_run_button_state()
 
     def _pause_resume(self):
         self.executor.pause()
@@ -439,11 +570,11 @@ class WasherUI(tk.Tk):
         self.executor.stop()
         self.btn_pause.config(state="disabled")
         self.btn_stop.config(state="disabled")
-        self.btn_run.config(state="normal")
         self.pb_var.set(0); self.pb_pct.config(text="0%"); self.current_step_name.set("—")
         self._latched_cycle = None
         self._latched_total_steps = 0
         self._set_run_ui_lock(False)
+        self._sync_run_button_state()
 
     # settings
     def _open_settings(self):
@@ -572,6 +703,8 @@ class WasherUI(tk.Tk):
                     self.toast("Dispositivo conectado")
             if hasattr(self.executor, "on_serial_reconnected"):
                 self.executor.on_serial_reconnected()
+            if self.serial.is_connected():
+                self.serial.send_json({"cmd": "door?"})
         self.after(0, _cb)
 
     def _on_comm_disconnected(self):
@@ -581,6 +714,7 @@ class WasherUI(tk.Tk):
             self._update_comm_panel_now()
             if was_connected:
                 self.toast("Dispositivo desconectado")
+            self._apply_door_state(None)
         self.after(0, _cb)
 
     def _on_close(self):
