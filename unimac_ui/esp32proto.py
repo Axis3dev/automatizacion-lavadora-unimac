@@ -62,6 +62,7 @@ class Esp32Controller:
                 pass
 
     def _out(self, target: str, on: int):
+        # on=1 energiza el relé; el hardware real es activo en LOW
         self.send({"cmd": "out", "target": target, "on": 1 if on else 0})
 
     def _dose(self, which: str, seconds: int):

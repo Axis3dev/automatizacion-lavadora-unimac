@@ -56,6 +56,12 @@ String speedNivel = "medio";
 
 
 // ====== HELPERS ======
+void setRelay(uint8_t pin, bool on) {
+  // on = true  => energiza el relé (activo en LOW)
+  // on = false => relé apagado (HIGH)
+  digitalWrite(pin, on ? LOW : HIGH);
+}
+
 void sendJson(const JsonDocument &doc) {
   serializeJson(doc, Serial);
   Serial.println();
@@ -146,9 +152,9 @@ void scheduleBuzzer(uint32_t durationMs) {
 }
 
 void speedNone() {
-  digitalWrite(REL_SPEED_BAJA, HIGH);
-  digitalWrite(REL_SPEED_MEDIA, HIGH);
-  digitalWrite(REL_SPEED_ALTA, HIGH);
+  setRelay(REL_SPEED_BAJA, false);
+  setRelay(REL_SPEED_MEDIA, false);
+  setRelay(REL_SPEED_ALTA, false);
 }
 
 void setSpeed(const String &levelRaw) {
@@ -156,11 +162,11 @@ void setSpeed(const String &levelRaw) {
   level.toLowerCase();
   speedNone();
   if (level == "low" || level == "bajo") {
-    digitalWrite(REL_SPEED_BAJA, LOW);
+    setRelay(REL_SPEED_BAJA, true);
   } else if (level == "med" || level == "medio" || level == "media") {
-    digitalWrite(REL_SPEED_MEDIA, LOW);
+    setRelay(REL_SPEED_MEDIA, true);
   } else if (level == "high" || level == "alto" || level == "alta") {
-    digitalWrite(REL_SPEED_ALTA, LOW);
+    setRelay(REL_SPEED_ALTA, true);
   }
 }
 
@@ -177,19 +183,19 @@ void setMotor(const String &dirRaw) {
   String dir = dirRaw;
   dir.toUpperCase();
   if (dir == "FWD") {
-    digitalWrite(REL_MOTOR_REV, HIGH);
-    digitalWrite(REL_MOTOR_FWD, LOW);
-    digitalWrite(REL_VFD_DIR, LOW);
-    digitalWrite(REL_VFD_RUN, LOW);
+    setRelay(REL_MOTOR_REV, false);
+    setRelay(REL_MOTOR_FWD, true);
+    setRelay(REL_VFD_DIR, false);
+    setRelay(REL_VFD_RUN, true);
   } else if (dir == "REV") {
-    digitalWrite(REL_MOTOR_FWD, HIGH);
-    digitalWrite(REL_MOTOR_REV, LOW);
-    digitalWrite(REL_VFD_DIR, HIGH);
-    digitalWrite(REL_VFD_RUN, LOW);
+    setRelay(REL_MOTOR_FWD, false);
+    setRelay(REL_MOTOR_REV, true);
+    setRelay(REL_VFD_DIR, true);
+    setRelay(REL_VFD_RUN, true);
   } else {
-    digitalWrite(REL_MOTOR_FWD, HIGH);
-    digitalWrite(REL_MOTOR_REV, HIGH);
-    digitalWrite(REL_VFD_RUN, HIGH);
+    setRelay(REL_MOTOR_FWD, false);
+    setRelay(REL_MOTOR_REV, false);
+    setRelay(REL_VFD_RUN, false);
   }
 }
 
@@ -206,12 +212,12 @@ void motorStop() {
 }
 
 void drainSet(bool open) {
-  digitalWrite(REL_DRAIN, open ? LOW : HIGH);
+  setRelay(REL_DRAIN, !open);
 }
 
 void waterStop() {
-  digitalWrite(REL_WATER_FRIA, LOW);
-  digitalWrite(REL_WATER_CALIENTE, LOW);
+  setRelay(REL_WATER_FRIA, false);
+  setRelay(REL_WATER_CALIENTE, false);
   fillColdActive = false;
   fillHotActive = false;
 }
@@ -223,10 +229,10 @@ void startFill(const char *temp, uint32_t durationMs) {
   }
   drainSet(false);  // close during fill
   if (strcmp(temp, "fria") == 0) {
-    digitalWrite(REL_WATER_FRIA, HIGH);
+    setRelay(REL_WATER_FRIA, true);
     scheduleFill(false, durationMs);
   } else if (strcmp(temp, "caliente") == 0) {
-    digitalWrite(REL_WATER_CALIENTE, HIGH);
+    setRelay(REL_WATER_CALIENTE, true);
     scheduleFill(true, durationMs);
   }
 }
@@ -236,7 +242,7 @@ void stopChem(uint8_t index) {
     return;
   }
   const uint8_t pins[4] = {REL_Q1, REL_Q2, REL_Q3, REL_Q4};
-  digitalWrite(pins[index], LOW);
+  setRelay(pins[index], false);
   chemActive[index] = false;
 }
 
@@ -245,22 +251,22 @@ void startChem(uint8_t index, uint32_t durationMs) {
   if (index >= 4) {
     return;
   }
-  digitalWrite(pins[index], HIGH);
+  setRelay(pins[index], true);
   scheduleChem(index, durationMs);
 }
 
 void buzzerOn(uint32_t durationMs) {
-  digitalWrite(REL_BUZZER, HIGH);
+  setRelay(REL_BUZZER, true);
   scheduleBuzzer(durationMs);
 }
 
 void buzzerOff() {
-  digitalWrite(REL_BUZZER, LOW);
+  setRelay(REL_BUZZER, false);
   buzzerActive = false;
 }
 
 void doorLock(bool lock) {
-  digitalWrite(REL_DOOR_LOCK, lock ? HIGH : LOW);
+  setRelay(REL_DOOR_LOCK, lock);
 }
 
 void allSafeOff() {
@@ -272,7 +278,7 @@ void allSafeOff() {
   }
   drainSet(true);   // open NA valve
   drainTimerActive = false;
-  digitalWrite(REL_DOOR_LOCK, LOW);
+  setRelay(REL_DOOR_LOCK, false);
   buzzerOff();
 }
 
@@ -329,6 +335,7 @@ void handleDrain(JsonObject obj) {
   } else {
     drainTimerActive = false;
   }
+  Serial.printf("[DRAIN] open=%s -> %s\n", open ? "true" : "false", (!open) ? "ON(LOW)" : "OFF(HIGH)");
 
   StaticJsonDocument<160> ack;
   ack["ack"] = "drain";
@@ -431,34 +438,40 @@ void handleLegacyOut(JsonObject obj) {
   bool active = obj.containsKey("on") ? (obj["on"].as<int>() != 0) : false;
 
   if (target == "DRAIN") {
+    uint8_t pin = REL_DRAIN;
     drainSet(!active);
+    Serial.printf("[RELAY] %s -> pin %u -> %s\n", target.c_str(), pin, active ? "ON(LOW)" : "OFF(HIGH)");
     drainTimerActive = false;
   } else if (target == "WATER_COLD") {
     if (active) {
       drainSet(false);
-      digitalWrite(REL_WATER_FRIA, HIGH);
+      setRelay(REL_WATER_FRIA, true);
     } else {
-      digitalWrite(REL_WATER_FRIA, LOW);
+      setRelay(REL_WATER_FRIA, false);
     }
     fillColdActive = false;
+    Serial.printf("[RELAY] %s -> %s\n", target.c_str(), active ? "ON(LOW)" : "OFF(HIGH)");
   } else if (target == "WATER_HOT") {
     if (active) {
       drainSet(false);
-      digitalWrite(REL_WATER_CALIENTE, HIGH);
+      setRelay(REL_WATER_CALIENTE, true);
     } else {
-      digitalWrite(REL_WATER_CALIENTE, LOW);
+      setRelay(REL_WATER_CALIENTE, false);
     }
     fillHotActive = false;
+    Serial.printf("[RELAY] %s -> %s\n", target.c_str(), active ? "ON(LOW)" : "OFF(HIGH)");
   } else if (target == "DOOR_LOCK") {
     doorLock(active);
+    Serial.printf("[RELAY] %s -> %s\n", target.c_str(), active ? "ON(LOW)" : "OFF(HIGH)");
   } else if (target == "Q1" || target == "Q2" || target == "Q3" || target == "Q4") {
     const uint8_t pins[4] = {REL_Q1, REL_Q2, REL_Q3, REL_Q4};
     uint8_t index = target.charAt(1) - '1';
     if (index < 4) {
-      digitalWrite(pins[index], active ? HIGH : LOW);
+      setRelay(pins[index], active);
       if (!active) {
         chemActive[index] = false;
       }
+      Serial.printf("[RELAY] %s -> %s\n", target.c_str(), active ? "ON(LOW)" : "OFF(HIGH)");
     }
   }
 
@@ -514,13 +527,13 @@ void handleLegacyVfd(JsonObject obj) {
 
   if (run == "on") {
     if (dir == "ccw") {
-      digitalWrite(REL_VFD_DIR, HIGH);
+      setRelay(REL_VFD_DIR, true);
     } else {
-      digitalWrite(REL_VFD_DIR, LOW);
+      setRelay(REL_VFD_DIR, false);
     }
-    digitalWrite(REL_VFD_RUN, LOW);
+    setRelay(REL_VFD_RUN, true);
   } else {
-    digitalWrite(REL_VFD_RUN, HIGH);
+    setRelay(REL_VFD_RUN, false);
   }
 
   StaticJsonDocument<160> ack;
@@ -637,17 +650,8 @@ void setup() {
 
   for (uint8_t pin : outputs) {
     pinMode(pin, OUTPUT);
-    digitalWrite(pin, LOW);
+    setRelay(pin, false);
   }
-
-  // Relés de motor/VFD activos en LOW: dejar apagados en reposo
-  digitalWrite(REL_MOTOR_FWD, HIGH);
-  digitalWrite(REL_MOTOR_REV, HIGH);
-  digitalWrite(REL_VFD_RUN, HIGH);
-  digitalWrite(REL_VFD_DIR, HIGH);
-  digitalWrite(REL_SPEED_BAJA, HIGH);
-  digitalWrite(REL_SPEED_MEDIA, HIGH);
-  digitalWrite(REL_SPEED_ALTA, HIGH);
 
   pinMode(PIN_EMERGENCY, INPUT);
   pinMode(PIN_VFD_FAULT, INPUT);
@@ -706,11 +710,11 @@ void loop() {
   }
 
   if (fillColdActive && now >= fillColdUntil) {
-    digitalWrite(REL_WATER_FRIA, LOW);
+    setRelay(REL_WATER_FRIA, false);
     fillColdActive = false;
   }
   if (fillHotActive && now >= fillHotUntil) {
-    digitalWrite(REL_WATER_CALIENTE, LOW);
+    setRelay(REL_WATER_CALIENTE, false);
     fillHotActive = false;
   }
 
