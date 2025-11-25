@@ -180,22 +180,25 @@ void setSpeedPresets(const String &nivel) {
 }
 
 void setMotor(const String &dirRaw) {
+  // Mapeo explícito para variador:
+  //  - REL_VFD_RUN: única salida de RUN (LOW = variador habilitado)
+  //  - REL_VFD_DIR: solo dirección (LOW = FWD, HIGH = REV)
+  //  - REL_MOTOR_FWD / REL_MOTOR_REV: reservados para contactores externos; se mantienen apagados.
   String dir = dirRaw;
   dir.toUpperCase();
+
+  // Desenergizar contactores físicos (no se usan en esta versión)
+  setRelay(REL_MOTOR_FWD, false);
+  setRelay(REL_MOTOR_REV, false);
+
   if (dir == "FWD") {
-    setRelay(REL_MOTOR_REV, false);
-    setRelay(REL_MOTOR_FWD, true);
-    setRelay(REL_VFD_DIR, false);
-    setRelay(REL_VFD_RUN, true);
+    setRelay(REL_VFD_DIR, false);  // LOW -> sentido normal
+    setRelay(REL_VFD_RUN, true);   // habilita RUN
   } else if (dir == "REV") {
-    setRelay(REL_MOTOR_FWD, false);
-    setRelay(REL_MOTOR_REV, true);
-    setRelay(REL_VFD_DIR, true);
-    setRelay(REL_VFD_RUN, true);
+    setRelay(REL_VFD_DIR, true);   // HIGH -> sentido inverso
+    setRelay(REL_VFD_RUN, true);   // habilita RUN
   } else {
-    setRelay(REL_MOTOR_FWD, false);
-    setRelay(REL_MOTOR_REV, false);
-    setRelay(REL_VFD_RUN, false);
+    setRelay(REL_VFD_RUN, false);  // STOP: RUN deshabilitado
   }
 }
 

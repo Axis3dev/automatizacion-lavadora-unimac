@@ -414,7 +414,8 @@ class Executor:
             "duracion": self.step_remaining,
             "nivel": getattr(step, "nivel_agua", None),
             "quimicos": list(getattr(step, "quimicos", []) or []),
-            "velocidad": getattr(step, "velocidad", None),
+            # Velocidad ya normalizada que se envía al ESP32
+            "velocidad": self._motor_speed,
         }
         self._send_event(payload)
 
@@ -487,7 +488,8 @@ class Executor:
         raw_speed = getattr(step, "velocidad", None) or default_speed
         normalized = self._normalize_speed(raw_speed)
         self._motor_speed = normalized
-        if normalized != self.current_speed:
+        force_send = getattr(step, "velocidad", None) is not None
+        if force_send or normalized != self.current_speed:
             self.current_speed = normalized
             self._send({"cmd": "vfd_speed", "level": normalized})
             dispatcher = getattr(self, "ui_send_event", None)
