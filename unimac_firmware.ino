@@ -22,8 +22,6 @@ const uint8_t REL_SPEED_ALTA     = 13;
 // ======================================================
 
 // ====== INPUT PINS ======
-const uint8_t PIN_EMERGENCY    = 35;
-const uint8_t PIN_VFD_FAULT    = 34;
 const uint8_t PIN_RES_IN1      = 0;
 const uint8_t PIN_RES_IN2      = 2;
 
@@ -656,8 +654,6 @@ void setup() {
     setRelay(pin, false);
   }
 
-  pinMode(PIN_EMERGENCY, INPUT);
-  pinMode(PIN_VFD_FAULT, INPUT);
   pinMode(PIN_RES_IN1, INPUT);
   pinMode(PIN_RES_IN2, INPUT);
   pinMode(IN_DOOR, INPUT_PULLUP);
@@ -736,21 +732,4 @@ void loop() {
     buzzerOff();
   }
 
-  bool emergency = digitalRead(PIN_EMERGENCY) == HIGH;
-  if (emergency) {
-    allSafeOff();
-    StaticJsonDocument<96> status;
-    status["status"] = "emergency";
-    sendJson(status);
-    delay(100);
-  }
-
-  bool vfdFault = digitalRead(PIN_VFD_FAULT) == HIGH;
-  if (vfdFault) {
-    motorStop();
-    StaticJsonDocument<96> status;
-    status["status"] = "vfd_fault";
-    sendJson(status);
-    delay(100);
-  }
 }
