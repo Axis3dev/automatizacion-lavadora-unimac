@@ -196,7 +196,9 @@ void setMotor(const String &dirRaw) {
     setRelay(REL_VFD_DIR, true);   // HIGH -> sentido inverso
     setRelay(REL_VFD_RUN, true);   // habilita RUN
   } else {
+    // STOP: apagar RUN y desactivar todas las velocidades
     setRelay(REL_VFD_RUN, false);  // STOP: RUN deshabilitado
+    speedNone();
   }
 }
 
@@ -535,6 +537,7 @@ void handleLegacyVfd(JsonObject obj) {
     setRelay(REL_VFD_RUN, true);
   } else {
     setRelay(REL_VFD_RUN, false);
+    speedNone();  // velocidad en reposo
   }
 
   StaticJsonDocument<160> ack;
@@ -666,7 +669,6 @@ void setup() {
   lastDoorReportMs = millis();
 
   allSafeOff();
-  setSpeedPresets(speedNivel);
 
   sendDoorState();
 

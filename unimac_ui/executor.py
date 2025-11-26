@@ -422,7 +422,7 @@ class Executor:
         self.hw.stop_all()
 
         if self._current_action in Executor.WATER_ACTIONS:
-            self._apply_speed_for_step(step)
+            self._apply_speed_for_step(step, force=True)
             self._start_water_step(step)
         elif self._current_action in Executor.SPIN_ACTIONS:
             self._start_spin_step(step)
@@ -472,7 +472,7 @@ class Executor:
         self.hw.drain_open(False)
         self._send({"cmd": "drain", "open": False})
         self._send_event({"event": "drain", "open": False, "seconds": self.step_remaining})
-        speed = self._apply_speed_for_step(step)
+        speed = self._apply_speed_for_step(step, force=True)
         self.hw.spin(speed)
         self._set_motor(True, direction="FWD")
 
@@ -483,13 +483,9 @@ class Executor:
         self._send({"cmd": "drain", "open": True})
         self._send_event({"event": "drain", "open": True, "seconds": self.step_remaining})
 
-    def _apply_speed_for_step(self, step) -> str:
-        default_speed = "alto" if self._current_action in Executor.SPIN_ACTIONS else "medio"
-        raw_speed = getattr(step, "velocidad", None) or default_speed
-        normalized = self._normalize_speed(raw_speed)
-        self._motor_speed = normalized
-        force_send = getattr(step, "velocidad", None) is not None
-        if force_send or normalized != self.current_speed:
+    def _send_speed_command(self, level: str, force: bool = False) -> str:
+        normalized = self._normalize_speed(level)
+        if force or normalized != self.current_speed:
             self.current_speed = normalized
             self._send({"cmd": "vfd_speed", "level": normalized})
             dispatcher = getattr(self, "ui_send_event", None)
@@ -498,6 +494,14 @@ class Executor:
             else:
                 self._send_event({"event": "speed", "nivel": normalized})
         return normalized
+
+    def _apply_speed_for_step(self, step, force: bool = False) -> str:
+        default_speed = "alto" if self._current_action in Executor.SPIN_ACTIONS else "medio"
+        raw_speed = getattr(step, "velocidad", None) or default_speed
+        normalized = self._normalize_speed(raw_speed)
+        self._motor_speed = normalized
+        force_send = force or getattr(step, "velocidad", None) is not None or normalized != self.current_speed
+        return self._send_speed_command(normalized, force=force_send)
 
     def _resume_current_step(self):
         if not self._current_step:
@@ -560,6 +564,8 @@ class Executor:
             self._motor_dir = direction
         self._motor_running = run
         if run:
+            # Garantizar que la velocidad esté aplicada justo antes de arrancar el motor
+            self._send_speed_command(self._motor_speed, force=True)
             event = "motor_fwd" if self._motor_dir == "FWD" else "motor_rev"
             cmd_dir = "FWD" if self._motor_dir == "FWD" else "REV"
         else:
@@ -614,10 +620,5 @@ class Executor:
     def on_serial_reconnected(self):
         if not self.current_speed:
             return
-        self._send({"cmd": "vfd_speed", "level": self.current_speed})
-        dispatcher = getattr(self, "ui_send_event", None)
-        if callable(dispatcher):
-            dispatcher("speed", valor=self.current_speed)
-        else:
-            self._send_event({"event": "speed", "nivel": self.current_speed})
+        self._send_speed_command(self.current_speed, force=True)
 
