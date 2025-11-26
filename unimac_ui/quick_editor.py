@@ -187,7 +187,7 @@ class QuickCycleWizard(tk.Toplevel):
         suffix = ""
         if s["accion"] == "enjuague" and s.get("rinse_final"):
             suffix = " (final)"
-        if s["accion"] == "centrifugado" and s.get("velocidad"):
+        if s.get("velocidad"):
             suffix += f" [{s['velocidad']}]"
         return f"{i+1}. {acc} ({mins} min){suffix}"
 
@@ -201,25 +201,25 @@ class QuickCycleWizard(tk.Toplevel):
         self.steps.clear()
         if name == "rapido":
             base = [
-                {"accion":"prelavado","min":2},
-                {"accion":"lavado","min":8},
-                {"accion":"enjuague","min":4},
+                {"accion":"prelavado","min":2,"velocidad":"medio"},
+                {"accion":"lavado","min":8,"velocidad":"medio"},
+                {"accion":"enjuague","min":4,"velocidad":"medio"},
                 {"accion":"centrifugado","min":3,"velocidad":"alto"},
             ]
         elif name == "industrial":
             base = [
-                {"accion":"prelavado","min":4},
-                {"accion":"lavado","min":15},
-                {"accion":"enjuague","min":5},
-                {"accion":"enjuague","min":5},
+                {"accion":"prelavado","min":4,"velocidad":"medio"},
+                {"accion":"lavado","min":15,"velocidad":"medio"},
+                {"accion":"enjuague","min":5,"velocidad":"medio"},
+                {"accion":"enjuague","min":5,"velocidad":"medio"},
                 {"accion":"centrifugado","min":4,"velocidad":"alto"},
             ]
         else:  # estandar
             base = [
-                {"accion":"prelavado","min":3},
-                {"accion":"lavado","min":12},
-                {"accion":"enjuague","min":5},
-                {"accion":"enjuague","min":5},
+                {"accion":"prelavado","min":3,"velocidad":"medio"},
+                {"accion":"lavado","min":12,"velocidad":"medio"},
+                {"accion":"enjuague","min":5,"velocidad":"medio"},
+                {"accion":"enjuague","min":5,"velocidad":"medio"},
                 {"accion":"centrifugado","min":4,"velocidad":"medio"},
             ]
 
@@ -245,8 +245,8 @@ class QuickCycleWizard(tk.Toplevel):
     # ------- pasos -------
     def _add_step(self, accion: str, minutos: int):
         d = {"accion":accion, "min":minutos, "rinse_final":False, "quimicos":set()}
-        if accion == "centrifugado":
-            d["velocidad"] = "alto"
+        if accion in ("prelavado", "lavado", "enjuague", "centrifugado"):
+            d["velocidad"] = "medio"
         if accion in ("prelavado","lavado"):
             d["quimicos"].add("detergente")
         self.steps.append(d)
@@ -284,13 +284,13 @@ class QuickCycleWizard(tk.Toplevel):
         e_min.bind("<FocusIn>", lambda e: self._set_active(e_min, "num"))
         e_min.bind("<<kb-ok>>", lambda e,i=i,ent=e_min: self._commit_minutes(i, ent))
 
-        # Velocidad solo si centrifugado
+        # Velocidad
         self.spd_row = ttk.Frame(self.step_frame)
-        if s["accion"] == "centrifugado":
+        if s["accion"] in ("prelavado", "lavado", "enjuague", "centrifugado"):
             self.spd_row.pack(fill="x", pady=(0,6))
             ttk.Label(self.spd_row, text="Velocidad:", font=("Segoe UI", 13, "bold")).pack(side="left")
             spd = ttk.Combobox(self.spd_row, values=self.SPEEDS, width=10, state="readonly")
-            spd.set(s.get("velocidad","alto"))
+            spd.set(s.get("velocidad","medio"))
             spd.pack(side="left", padx=(6,16))
             spd.bind("<<ComboboxSelected>>", lambda e,i=i,cb=spd: self._set_speed(i, cb.get()))
 
@@ -335,9 +335,8 @@ class QuickCycleWizard(tk.Toplevel):
     def _set_action(self, idx: int, accion: str):
         s = self.steps[idx]
         s["accion"] = accion
-        # reset velocidad si cambia a/desde centrifugado
-        if accion == "centrifugado":
-            s["velocidad"] = s.get("velocidad","alto")
+        if accion in ("prelavado", "lavado", "enjuague", "centrifugado"):
+            s["velocidad"] = s.get("velocidad", "medio") or "medio"
         else:
             s.pop("velocidad", None)
         # reset enjuague final si no es enjuague
@@ -358,7 +357,7 @@ class QuickCycleWizard(tk.Toplevel):
         self._refresh_lb()
 
     def _set_speed(self, idx: int, spd: str):
-        if self.steps[idx]["accion"] == "centrifugado":
+        if self.steps[idx]["accion"] in ("prelavado", "lavado", "enjuague", "centrifugado"):
             self.steps[idx]["velocidad"] = spd
             self._refresh_lb()
 
@@ -498,7 +497,10 @@ class QuickCycleWizard(tk.Toplevel):
                 return
 
             nivel = "" if accion in ("centrifugado","drenaje") else "estandar"
-            vel = s.get("velocidad","") if accion == "centrifugado" else ""
+            if accion in ("prelavado", "lavado", "enjuague", "centrifugado"):
+                vel = s.get("velocidad", "medio") or "medio"
+            else:
+                vel = ""
             chems = sorted(list(s.get("quimicos", set())))
 
             pasos.append(Step(

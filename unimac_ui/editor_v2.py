@@ -258,10 +258,15 @@ class TouchCycleEditor(tk.Toplevel):
 
     # ---------- helpers de modelo ----------
     def _mk_step_obj(self, d: Dict) -> Step:
-        s = Step(accion=d.get("accion", "lavado"), duracion=int(d.get("duracion", 0)))
+        accion = d.get("accion", "lavado")
+        s = Step(accion=accion, duracion=int(d.get("duracion", 0)))
         setattr(s, "nivel_agua", d.get("nivel_agua", "") or "")
         setattr(s, "quimicos", list(d.get("quimicos", []) or []))
-        setattr(s, "velocidad", d.get("velocidad", None))
+        vel_raw = d.get("velocidad", None)
+        if accion in ("prelavado", "lavado", "enjuague", "centrifugado"):
+            setattr(s, "velocidad", vel_raw or "medio")
+        else:
+            setattr(s, "velocidad", vel_raw if vel_raw else None)
         return s
 
     def _lb_text(self, i: int) -> str:
@@ -269,7 +274,7 @@ class TouchCycleEditor(tk.Toplevel):
         acc = getattr(s, "accion", "?").capitalize()
         mins = int(getattr(s, "duracion", 0)) // 60
         extra = ""
-        if getattr(s, "accion", "") == "centrifugado" and getattr(s, "velocidad", None):
+        if getattr(s, "velocidad", None):
             extra = f" [{getattr(s, 'velocidad').capitalize()}]"
         return f"{i+1}. {acc} ({mins} min){extra}"
 
@@ -320,9 +325,9 @@ class TouchCycleEditor(tk.Toplevel):
             rb.pack(side="left", padx=6)
             self._lvl_buttons.append(rb)
 
-        # Velocidad (solo centrifugado)
+        # Velocidad (para pasos con giro)
         self.spd_row = ttk.Frame(self.step_frame)
-        if getattr(s, "accion", "") == "centrifugado":
+        if getattr(s, "accion", "") in ("prelavado", "lavado", "enjuague", "centrifugado"):
             self.spd_row.pack(fill="x", pady=(0, 6))
             ttk.Label(self.spd_row, text="Velocidad:", font=self.f_label).pack(side="left")
             spd_var = tk.StringVar(value=getattr(s, "velocidad", "medio") or "medio")
@@ -376,6 +381,11 @@ class TouchCycleEditor(tk.Toplevel):
             if not getattr(s, "velocidad", None):
                 setattr(s, "velocidad", "medio")
             setattr(s, "nivel_agua", "")
+        elif accion in ("prelavado", "lavado", "enjuague"):
+            if not getattr(s, "velocidad", None):
+                setattr(s, "velocidad", "medio")
+            if not getattr(s, "nivel_agua", ""):
+                setattr(s, "nivel_agua", "estandar")
         else:
             setattr(s, "velocidad", None)
             if accion not in ("centrifugado", "drenaje") and not getattr(s, "nivel_agua", ""):
@@ -405,7 +415,7 @@ class TouchCycleEditor(tk.Toplevel):
 
     def _set_speed(self, idx: int, spd: str):
         s = self.working_cycle.pasos[idx]
-        if getattr(s, "accion", "") == "centrifugado":
+        if getattr(s, "accion", "") in ("prelavado", "lavado", "enjuague", "centrifugado"):
             setattr(s, "velocidad", spd)
             self._refresh_steps_list()
 
@@ -518,7 +528,7 @@ class TouchCycleEditor(tk.Toplevel):
     def _add_step(self, accion: str, mins: int):
         d = dict(accion=accion, duracion=int(mins) * 60,
                  nivel_agua=("estandar" if accion not in ("centrifugado", "drenaje") else ""))
-        if accion == "centrifugado":
+        if accion in ("prelavado", "lavado", "enjuague", "centrifugado"):
             d["velocidad"] = "medio"
         qs = set()
         if accion in ("prelavado", "lavado"):
