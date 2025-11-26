@@ -96,6 +96,10 @@ class Executor:
         self._motor_next_dir = "FWD"
         self._motor_is_agitation = False
         self.in_drain_pause = False
+        self._is_filling = False
+        self._fill_remaining = 0
+        self._agitation_active = False
+        self._step_target_speed = "medio"
         self._drain_profile = None
         self._drain_label = None
         self.ui_send_event = getattr(self, "ui_send_event", None)
@@ -226,6 +230,10 @@ class Executor:
         self._drain_profile = None
         self._drain_label = None
         self.current_speed = None
+        self._is_filling = False
+        self._fill_remaining = 0
+        self._agitation_active = False
+        self._step_target_speed = "medio"
 
     def start(self):
         if not self.cycle or not self.cycle.pasos:
@@ -327,6 +335,9 @@ class Executor:
 
     # ---------- lógica de tick ----------
     def _tick_step(self):
+        if self._is_filling:
+            self._tick_fill()
+            return
         if self.step_remaining > 0:
             self.step_remaining = max(0, self.step_remaining - 1)
         if self.total_remaining > 0:
@@ -340,8 +351,6 @@ class Executor:
     def _tick_drain(self):
         if self._drain_remaining > 0:
             self._drain_remaining = max(0, self._drain_remaining - 1)
-        if self.total_remaining > 0:
-            self.total_remaining = max(0, self.total_remaining - 1)
 
         if self._drain_remaining <= 0:
             self.hw.drain_open(False)
@@ -400,6 +409,10 @@ class Executor:
         self._motor_dir = "FWD"
         self._motor_next_dir = "REV"
         self._motor_is_agitation = self._current_action in Executor.WATER_ACTIONS
+        self._agitation_active = self._current_action in Executor.SPIN_ACTIONS
+        self._is_filling = False
+        self._fill_remaining = 0
+        self._step_target_speed = self._motor_speed
 
         self.step_remaining = max(1, self._safe_int(getattr(step, "duracion", 0), 1))
         self._mode = Executor._MODE_STEP
@@ -465,7 +478,7 @@ class Executor:
             self._send({"cmd": "chem", "id": ident, "t_s": secs})
             self._send_event({"event": "chem", "id": ident, "seconds": secs})
 
-        self._start_motor()
+        self._begin_fill_phase(fill_seconds)
 
     def _start_spin_step(self, step):
         print(f"[EXEC] Iniciando centrifugado")
@@ -507,7 +520,11 @@ class Executor:
         if not self._current_step:
             return
         if self._current_action in Executor.WATER_ACTIONS:
-            self._start_motor()
+            if self._is_filling:
+                self._send_speed_command("bajo", force=True)
+                self._set_motor(True, direction="FWD")
+            else:
+                self._start_motor()
         elif self._current_action in Executor.SPIN_ACTIONS:
             self._set_motor(True, direction=self._motor_dir)
 
@@ -557,6 +574,7 @@ class Executor:
         self._motor_pause_timer = 0
         self._motor_pause_active = False
         self._motor_next_dir = "REV"
+        self._agitation_active = True
         self._set_motor(True, direction=self._motor_dir)
 
     def _set_motor(self, run: bool, direction: Optional[str] = None):
@@ -575,7 +593,7 @@ class Executor:
         self._send_event({"event": event})
 
     def _update_motor_alt(self):
-        if not self._motor_is_agitation:
+        if not self._motor_is_agitation or not self._agitation_active:
             return
         if self._motor_interval <= 0:
             return
@@ -621,4 +639,35 @@ class Executor:
         if not self.current_speed:
             return
         self._send_speed_command(self.current_speed, force=True)
+
+    # ---------- llenado y fases previas a agitación ----------
+    def _begin_fill_phase(self, fill_seconds: int) -> None:
+        self._fill_remaining = max(0, int(fill_seconds or 0))
+        self._is_filling = self._fill_remaining > 0
+        if not self._is_filling:
+            self._start_motor()
+            return
+
+        # Mezcla durante el llenado: giro FWD a velocidad baja sin consumir tiempo de paso
+        target_speed = self._step_target_speed or self._motor_speed
+        self._motor_speed = "bajo"
+        self._send_speed_command("bajo", force=True)
+        self._set_motor(True, direction="FWD")
+        self._motor_speed = target_speed
+
+    def _tick_fill(self):
+        if self._fill_remaining > 0:
+            self._fill_remaining = max(0, self._fill_remaining - 1)
+        if self._fill_remaining <= 0:
+            self._finish_fill_phase()
+
+    def _finish_fill_phase(self):
+        if not self._is_filling:
+            return
+        self._is_filling = False
+        self._agitation_active = False
+        # Aplicar la velocidad configurada para la etapa de agitación y arrancar alternancias
+        self._set_motor(False)
+        self._motor_speed = self._step_target_speed or self._motor_speed
+        self._start_motor()
 
