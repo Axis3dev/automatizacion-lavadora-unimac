@@ -276,7 +276,6 @@ class Executor:
         self.hw.stop_all()
         self.hw.drain_open(True)
         self._send({"cmd": "drain", "open": True})
-        self._send({"cmd": "door", "lock": False})
         self._send_event({"event": "stop"})
         self.cb.on_status("Detenido (paro seguro)")
         self.current_speed = None
@@ -287,7 +286,6 @@ class Executor:
         self.hw.stop_all()
         self.hw.drain_open(True)
         self._send({"cmd": "drain", "open": True})
-        self._send({"cmd": "door", "lock": False})
         self._send_event({"event": "finish"})
         self.cb.on_status("Ciclo terminado")
         self.cb.on_finish()
@@ -373,7 +371,6 @@ class Executor:
         self.hw.stop_all()
         self.hw.drain_open(True)
         self._send({"cmd": "drain", "open": True})
-        self._send({"cmd": "door", "lock": False})
         self._send_event({"event": "emergency"})
         self.cb.on_status("Paro de emergencia")
         self.current_speed = None

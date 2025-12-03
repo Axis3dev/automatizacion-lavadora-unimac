@@ -269,7 +269,9 @@ void buzzerOff() {
 }
 
 void doorLock(bool lock) {
-  setRelay(REL_DOOR_LOCK, lock);
+  // lock = true  -> relé OFF (bobina sin energía) -> puerta bloqueada (vástago afuera)
+  // lock = false -> relé ON  (bobina energizada)  -> puerta desbloqueada (vástago retraído)
+  setRelay(REL_DOOR_LOCK, !lock);
 }
 
 void allSafeOff() {
