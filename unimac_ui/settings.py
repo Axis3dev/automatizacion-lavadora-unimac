@@ -7,6 +7,11 @@ from tkinter import ttk, messagebox
 from typing import Callable, Optional, Dict
 
 try:
+    from .output_test_window import OutputTestWindow
+except Exception:
+    OutputTestWindow = None  # type: ignore
+
+try:
     from serial.tools import list_ports
 except Exception:
     list_ports = None
@@ -145,6 +150,8 @@ class SettingsDialog(tk.Toplevel):
         self.f_field  = tkfont.Font(size=16)
         self.f_button = tkfont.Font(size=18, weight="bold")
 
+        self._output_test_win: Optional[tk.Toplevel] = None
+
         # Comunicación
         self.port_var = tk.StringVar(value=self.serial.preferred_port or "")
         self.baud_var = tk.IntVar(value=int(self.serial.baudrate or 115200))
@@ -282,13 +289,17 @@ class SettingsDialog(tk.Toplevel):
         sysf.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0,8))
         ttk.Button(sysf, text="Apagar sistema", command=self._close_app).pack(side="left", padx=(0,8), pady=(4,4))
 
+        testsf = ttk.LabelFrame(main, text="Pruebas", padding=12)
+        testsf.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(0,8))
+        ttk.Button(testsf, text="Testeo de salidas", command=self._open_output_tests).pack(side="left", padx=(0,8), pady=(4,4))
+
         bottom = ttk.Frame(root)
         bottom.grid(row=1, column=0, sticky="ew")
         ttk.Button(bottom, text="Cancelar", command=self._on_cancel).pack(side="right", padx=(0,8))
         ttk.Button(bottom, text="Guardar", command=self._on_save).pack(side="right", padx=(0,8))
 
         kbwrap = ttk.Frame(main)
-        kbwrap.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(6,0))
+        kbwrap.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(6,0))
         self._focused_entry: Optional[tk.Entry] = None
         self.kb_num = KeyboardFrame(kbwrap, mode="numeric", title="Teclado numérico",
                                     getter=lambda: self._focused_entry, scale=0.95)
@@ -359,6 +370,31 @@ class SettingsDialog(tk.Toplevel):
         threading.Thread(target=task, daemon=True).start()
 
     # sistema
+    def _open_output_tests(self):
+        if OutputTestWindow is None:
+            messagebox.showerror("Error", "No se pudo cargar la ventana de pruebas.")
+            return
+        try:
+            if self._output_test_win and self._output_test_win.winfo_exists():
+                self._output_test_win.lift(); self._output_test_win.focus_force()
+                return
+        except Exception:
+            self._output_test_win = None
+        try:
+            self._output_test_win = OutputTestWindow(self, self.serial)
+            self._output_test_win.protocol("WM_DELETE_WINDOW", self._close_output_tests)
+        except Exception as exc:
+            self._output_test_win = None
+            messagebox.showerror("Error", str(exc))
+
+    def _close_output_tests(self):
+        try:
+            if self._output_test_win and self._output_test_win.winfo_exists():
+                self._output_test_win.destroy()
+        except Exception:
+            pass
+        self._output_test_win = None
+
     def _close_app(self):
         try: self.master.destroy()
         except Exception: os._exit(0)
