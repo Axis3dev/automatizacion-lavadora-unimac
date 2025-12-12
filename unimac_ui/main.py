@@ -149,6 +149,12 @@ class WasherUI(tk.Tk):
         self.after(0, self._cache_run_button_size)
         self._sync_run_button_state()
 
+        # Reconexión automática no bloqueante (cuando el puerto aparece tras el arranque)
+        self._auto_conn_job = None
+        self._auto_conn_running = False
+        self._auto_conn_enabled = True
+        self.after(1200, self._auto_connect_tick)
+
         self.after(self.TICK_MS, self._loop_logic)
         self.after(self.COMM_UI_MS, self._update_comm_panel_periodic)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -730,6 +736,23 @@ class WasherUI(tk.Tk):
         target = not self.door_locked
         self.serial.send_json({"cmd": "door", "lock": target})
 
+    def _auto_connect_tick(self):
+        if not self._auto_conn_enabled:
+            return
+        already_connecting = getattr(self.serial, "is_connecting", lambda: False)()
+        if (not self.serial.is_connected()) and (not self._auto_conn_running) and (not already_connecting):
+            self._auto_conn_running = True
+            import threading
+
+            def task():
+                try:
+                    self.serial.connect_auto()
+                finally:
+                    self.after(0, lambda: setattr(self, "_auto_conn_running", False))
+
+            threading.Thread(target=task, daemon=True).start()
+        self._auto_conn_job = self.after(1500, self._auto_connect_tick)
+
     def _on_comm_connected(self, port: Optional[str]):
         def _cb():
             first = not self._comm_last_state
@@ -757,6 +780,12 @@ class WasherUI(tk.Tk):
         self.after(0, _cb)
 
     def _on_close(self):
+        self._auto_conn_enabled = False
+        try:
+            if self._auto_conn_job:
+                self.after_cancel(self._auto_conn_job)
+        except Exception:
+            pass
         try:
             self.comm_watcher.stop(); self.comm_watcher.join(timeout=1.0)
             self.serial.close()

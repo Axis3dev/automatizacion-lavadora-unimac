@@ -56,6 +56,8 @@ class SerialConn:
         self.preferred_port = preferred_port
         self._serial: Optional[Serial] = None
         self._lock = threading.Lock()
+        self._connect_lock = threading.Lock()
+        self._connect_in_progress = False
         self.port_name: Optional[str] = None
         self._on_json: Optional[Callable[[dict], None]] = None
         self._reader_thread: Optional[threading.Thread] = None
@@ -108,9 +110,29 @@ class SerialConn:
             ser = self._serial
         return bool(ser and ser.is_open)
 
+    def is_connecting(self) -> bool:
+        return self._connect_in_progress
+
+    def _begin_connect(self) -> bool:
+        if not self._connect_lock.acquire(blocking=False):
+            return False
+        self._connect_in_progress = True
+        return True
+
+    def _end_connect(self) -> None:
+        self._connect_in_progress = False
+        try:
+            self._connect_lock.release()
+        except Exception:
+            pass
+
     # ------------------------------- conexión --------------------------------
-    def connect(self, port: str) -> bool:
+    def connect(self, port: str, *, guarded: bool = True) -> bool:
+        if guarded and not self._begin_connect():
+            return False
         if _is_blocked_port(port) or Serial is None:
+            if guarded:
+                self._end_connect()
             return False
 
         try:
@@ -123,6 +145,8 @@ class SerialConn:
             ser.reset_input_buffer()
             ser.reset_output_buffer()
         except (SerialException, OSError, ValueError):
+            if guarded:
+                self._end_connect()
             return False
 
         with self._lock:
@@ -138,6 +162,8 @@ class SerialConn:
         CFG["baudrate"] = self.baudrate
         save_config(CFG)
         self._start_reader()
+        if guarded:
+            self._end_connect()
         return True
 
     def _probe_port(self, port: str, timeout: float = 1.8) -> Tuple[bool, Optional[bool]]:
@@ -209,24 +235,37 @@ class SerialConn:
             pass
         return found, door_state
 
-    def connect_with_handshake(self, port: str) -> bool:
+    def connect_with_handshake(self, port: str, *, guarded: bool = True) -> bool:
+        if guarded and not self._begin_connect():
+            return False
         ok, door_state = self._probe_port(port)
         if not ok:
+            if guarded:
+                self._end_connect()
             return False
-        if not self.connect(port):
+        if not self.connect(port, guarded=False):
+            if guarded:
+                self._end_connect()
             return False
         if door_state is not None:
             self.status["door_closed"] = door_state
             self.status["door_ts"] = time.time()
         else:
             self.send_json({"cmd": "door?"})
+        if guarded:
+            self._end_connect()
         return True
 
     def connect_auto(self) -> bool:
-        for port in self.list_ports():
-            if self.connect_with_handshake(port):
-                return True
-        return False
+        if not self._begin_connect():
+            return False
+        try:
+            for port in self.list_ports():
+                if self.connect_with_handshake(port, guarded=False):
+                    return True
+            return False
+        finally:
+            self._end_connect()
 
     def close(self) -> None:
         with self._lock:
@@ -428,6 +467,7 @@ class CommWatcher(threading.Thread):
         while not self._stop.is_set():
             try:
                 connected = self.serial.is_connected()
+                connecting = getattr(self.serial, "is_connecting", lambda: False)()
                 current_port = self.serial.port_name
                 available_ports = list(self.serial.list_ports())
                 port_present = current_port in available_ports if current_port else False
@@ -458,7 +498,7 @@ class CommWatcher(threading.Thread):
                         self._emit(self._on_disconnect)
                         self._last_door_poll = 0.0
 
-                    if self._attempt_reconnect(available_ports):
+                    if not connecting and self._attempt_reconnect(available_ports):
                         self._last_connected = True
                         self._last_port = self.serial.port_name
                         self._last_door_poll = 0.0
