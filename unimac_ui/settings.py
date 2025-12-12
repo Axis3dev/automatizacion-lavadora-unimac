@@ -363,7 +363,7 @@ class SettingsDialog(tk.Toplevel):
         def task():
             try:
                 self.serial.baudrate = sel_baud
-                ok = self.serial.connect(sel_port) if sel_port else self.serial.connect_auto()
+                ok = self.serial.connect_with_handshake(sel_port) if sel_port else self.serial.connect_auto()
                 self.after(0, lambda: messagebox.showinfo("Conexión","Conectado" if ok else "No se pudo conectar"))
             except Exception as e:
                 self.after(0, lambda: messagebox.showerror("Error", str(e)))

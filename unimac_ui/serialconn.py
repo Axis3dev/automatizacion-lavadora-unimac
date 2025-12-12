@@ -5,7 +5,7 @@ import json
 import os
 import threading
 import time
-from typing import Callable, Iterable, Optional
+from typing import Callable, Iterable, Optional, Tuple
 
 try:
     from serial import Serial, SerialException  # type: ignore
@@ -63,14 +63,45 @@ class SerialConn:
         self.status: dict = {"door_closed": None}
 
     # ------------------------------- utilidades -------------------------------
-    def list_ports(self) -> Iterable[str]:
+    def _candidate_infos(self) -> Tuple[list, list]:
+        preferred: list[str] = []
+        others: list[Tuple[int, str]] = []
+
+        if self.preferred_port and not _is_blocked_port(self.preferred_port):
+            preferred.append(self.preferred_port)
+
         if list_ports is None:
-            return []
+            return preferred, []
+
         try:
-            ports = [p.device for p in list_ports.comports()]
+            for info in list_ports.comports():
+                dev = getattr(info, "device", None)
+                if not dev or _is_blocked_port(dev):
+                    continue
+                desc = (getattr(info, "description", "") or "").lower()
+                vid = getattr(info, "vid", None)
+                score = 0
+                if vid in (0x1A86, 0x10C4, 0x303A):
+                    score -= 2
+                if "usb" in desc or "serial" in desc or "uart" in desc:
+                    score -= 1
+                others.append((score, dev))
         except Exception:
-            ports = []
-        return [p for p in ports if not _is_blocked_port(p)]
+            pass
+
+        others.sort()
+        return preferred, [dev for _, dev in others]
+
+    def list_ports(self) -> Iterable[str]:
+        preferred, others = self._candidate_infos()
+        ordered = []
+        for dev in preferred:
+            if dev not in ordered:
+                ordered.append(dev)
+        for dev in others:
+            if dev not in ordered:
+                ordered.append(dev)
+        return ordered
 
     def is_connected(self) -> bool:
         with self._lock:
@@ -109,12 +140,91 @@ class SerialConn:
         self._start_reader()
         return True
 
+    def _probe_port(self, port: str, timeout: float = 1.8) -> Tuple[bool, Optional[bool]]:
+        if Serial is None:
+            return False, None
+        try:
+            ser = Serial(
+                port=port,
+                baudrate=self.baudrate,
+                timeout=0.12,
+                write_timeout=0.3,
+                rtscts=False,
+                dsrdtr=False,
+            )
+        except (SerialException, OSError, ValueError):
+            return False, None
+        try:
+            ser.reset_output_buffer()
+        except Exception:
+            pass
+        try:
+            ser.reset_input_buffer()
+        except Exception:
+            pass
+        try:
+            ser.setDTR(False)
+            ser.setRTS(False)
+        except Exception:
+            pass
+        try:
+            ser.write(b'{"cmd":"door?"}\n')
+            ser.flush()
+        except Exception:
+            pass
+
+        found = False
+        door_state: Optional[bool] = None
+        buf = bytearray()
+        deadline = time.time() + max(0.3, float(timeout))
+        while time.time() < deadline:
+            try:
+                chunk = ser.read(max(1, ser.in_waiting or 0))
+            except (SerialException, OSError):
+                break
+            if chunk:
+                buf.extend(chunk)
+                while b"\n" in buf:
+                    raw, _, buf = buf.partition(b"\n")
+                    line = raw.strip().decode("utf-8", errors="ignore")
+                    if not line:
+                        continue
+                    if "\"boot\"" in line or "[PINMAP" in line or "\"event\":\"door\"" in line:
+                        found = True
+                    try:
+                        obj = json.loads(line)
+                    except Exception:
+                        obj = None
+                    if isinstance(obj, dict):
+                        if obj.get("boot") == "ok":
+                            found = True
+                        if obj.get("event") == "door" and "closed" in obj:
+                            door_state = bool(obj.get("closed"))
+                            found = True
+            else:
+                time.sleep(0.05)
+        try:
+            ser.close()
+        except Exception:
+            pass
+        return found, door_state
+
+    def connect_with_handshake(self, port: str) -> bool:
+        ok, door_state = self._probe_port(port)
+        if not ok:
+            return False
+        if not self.connect(port):
+            return False
+        if door_state is not None:
+            self.status["door_closed"] = door_state
+            self.status["door_ts"] = time.time()
+        else:
+            self.send_json({"cmd": "door?"})
+        return True
+
     def connect_auto(self) -> bool:
-        if self.preferred_port and not _is_blocked_port(self.preferred_port):
-            if self.connect(self.preferred_port):
-                return True
         for port in self.list_ports():
-            if self.connect(port):
+            if self.connect_with_handshake(port):
                 return True
         return False
 
@@ -302,11 +412,11 @@ class CommWatcher(threading.Thread):
         else:
             target = None
         for port in ports:
-            if self.serial.connect(port):
+            if self.serial.connect_with_handshake(port):
                 return True
         if not target:
             for port in self.serial.list_ports():
-                if self.serial.connect(port):
+                if self.serial.connect_with_handshake(port):
                     return True
         return False
 

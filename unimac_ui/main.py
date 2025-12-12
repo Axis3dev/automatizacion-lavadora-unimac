@@ -60,6 +60,7 @@ class WasherUI(tk.Tk):
         # Serial
         self.serial = SerialConn(baudrate=BAUDRATE, preferred_port=PREFERRED_PORT)
         self._comm_last_state = self.serial.is_connected()
+        self.serial.set_on_json(self._on_serial_json)
         self.comm_watcher = CommWatcher(
             self.serial,
             poll_sec=0.5,
@@ -68,7 +69,6 @@ class WasherUI(tk.Tk):
             tk_after=self.after,
         )
         self.comm_watcher.start()
-        self.serial.set_on_json(self._on_serial_json)
 
         self.CFG = CFG
 
