@@ -631,6 +631,8 @@ void handleCommand(JsonObject obj) {
 // ====== SETUP & LOOP ======
 void setup() {
   Serial.begin(115200);
+  // Pequeño respiro para que el host enumere el puerto y lea los primeros prints
+  delay(100);
 
   Serial.println(F("[PINMAP] Q1=21 Q2=19 Q3=18 Q4=5 COLD=17 HOT=16 DRAIN=22 DOOR=23"));
   Serial.println(F("[PINMAP] FWD=14 REV=27 RUN=26 DIR=25 SLOW=33 MED=32 FAST=13 BUZ=4"));
@@ -698,18 +700,25 @@ void loop() {
   if (closedRaw != doorSampleClosed) {
     doorSampleClosed = closedRaw;
     doorDebounceAt = now;
-  } else if ((now - doorDebounceAt) > DOOR_DEBOUNCE_MS && closedRaw != doorClosed) {
-    doorClosed = closedRaw;
   }
 
-  bool changed = doorClosed != lastDoorClosed;
-  if (changed || (now - lastDoorReportMs) > 1000) {
-    lastDoorReportMs = now;
-    lastDoorClosed = doorClosed;
-    sendDoorState();
-    if (changed && !doorClosed) {
+  bool doorChanged = false;
+  if ((now - doorDebounceAt) > DOOR_DEBOUNCE_MS && closedRaw != doorClosed) {
+    doorClosed = closedRaw;
+    doorChanged = true;
+  }
+
+  if (doorChanged) {
+    if (!doorClosed) {
+      // Paro seguro inmediato si la puerta pasa a abierta
       allSafeOff();
     }
+    sendDoorState();
+    lastDoorReportMs = now;
+    lastDoorClosed = doorClosed;
+  } else if ((now - lastDoorReportMs) > 1000) {
+    sendDoorState();
+    lastDoorReportMs = now;
   }
 
   if (fillColdActive && now >= fillColdUntil) {
