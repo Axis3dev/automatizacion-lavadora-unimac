@@ -48,6 +48,10 @@ def _is_blocked_port(port: Optional[str]) -> bool:
     return port == BLOCKED_PORTS[0] or port.endswith(BLOCKED_PORTS[1])
 
 
+def _log(msg: str) -> None:
+    print(f"[SERIAL] {msg}")
+
+
 class SerialConn:
     """Wrapper mínima sobre pyserial con autoconexión y envío JSON."""
 
@@ -59,6 +63,7 @@ class SerialConn:
         self._connect_lock = threading.Lock()
         self._connect_in_progress = False
         self.port_name: Optional[str] = None
+        self._last_ports_repr: Optional[str] = None
         self._on_json: Optional[Callable[[dict], None]] = None
         self._reader_thread: Optional[threading.Thread] = None
         self._reader_stop: Optional[threading.Event] = None
@@ -71,6 +76,18 @@ class SerialConn:
 
         if self.preferred_port and not _is_blocked_port(self.preferred_port):
             preferred.append(self.preferred_port)
+
+        # Primero los enlaces estables de /dev/serial/by-id si existen
+        by_id_base = "/dev/serial/by-id"
+        if os.path.isdir(by_id_base):
+            try:
+                for name in sorted(os.listdir(by_id_base)):
+                    path = os.path.join(by_id_base, name)
+                    if not os.path.exists(path):
+                        continue
+                    preferred.append(path)
+            except Exception:
+                pass
 
         if list_ports is None:
             return preferred, []
@@ -103,6 +120,10 @@ class SerialConn:
         for dev in others:
             if dev not in ordered:
                 ordered.append(dev)
+        repr_ports = ",".join(ordered)
+        if repr_ports != self._last_ports_repr:
+            self._last_ports_repr = repr_ports
+            _log(f"Puertos detectados: {ordered}")
         return ordered
 
     def is_connected(self) -> bool:
@@ -136,6 +157,7 @@ class SerialConn:
             return False
 
         try:
+            _log(f"Abriendo puerto {port} @ {self.baudrate} bps")
             ser = Serial(
                 port=port,
                 baudrate=self.baudrate,
@@ -170,6 +192,7 @@ class SerialConn:
         if Serial is None:
             return False, None
         try:
+            _log(f"Probar handshake en {port}")
             ser = Serial(
                 port=port,
                 baudrate=self.baudrate,
@@ -233,6 +256,7 @@ class SerialConn:
             ser.close()
         except Exception:
             pass
+        _log(f"Handshake {'OK' if found else 'falló'} en {port} (door={door_state})")
         return found, door_state
 
     def connect_with_handshake(self, port: str, *, guarded: bool = True) -> bool:
@@ -247,6 +271,7 @@ class SerialConn:
             if guarded:
                 self._end_connect()
             return False
+        _log(f"Conectado a {port}")
         if door_state is not None:
             self.status["door_closed"] = door_state
             self.status["door_ts"] = time.time()
@@ -294,7 +319,7 @@ class SerialConn:
     # -------------------------------- envío ----------------------------------
     def send_json(self, payload: dict) -> bool:
         if not self.is_connected():
-            print("[SER] drop send_json: not connected")
+            _log("drop send_json: not connected")
             return False
         try:
             line = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
@@ -304,17 +329,17 @@ class SerialConn:
         with self._lock:
             ser = self._serial
         if not ser or not ser.is_open:
-            print("[SER] drop send_json: port closed")
+            _log("drop send_json: port closed")
             return False
         try:
             with self._lock:
                 ser.write(data)
                 ser.flush()
         except (SerialException, OSError) as exc:
-            print(f"[SER] write error: {exc}")
+            _log(f"write error: {exc}")
             self.close()
             return False
-        print(f"[SER→ESP] {line}")
+        _log(f"SER→ESP {line}")
         return True
 
     # --------------------------------- JSON RX ---------------------------------
@@ -341,7 +366,7 @@ class SerialConn:
             try:
                 waiting = ser.in_waiting
             except (SerialException, OSError) as exc:
-                print(f"[SER] in_waiting error: {exc}")
+                _log(f"in_waiting error: {exc}")
                 self.close()
                 time.sleep(0.2)
                 continue
@@ -351,7 +376,7 @@ class SerialConn:
             try:
                 data = ser.read(waiting)
             except (SerialException, OSError) as exc:
-                print(f"[SER] read error: {exc}")
+                _log(f"read error: {exc}")
                 self.close()
                 time.sleep(0.2)
                 continue
@@ -365,7 +390,7 @@ class SerialConn:
                 line = raw_line.strip().decode("utf-8", errors="ignore")
                 if not line:
                     continue
-                print(f"[ESP→SER] {line}")
+                _log(f"ESP→SER {line}")
                 try:
                     obj = json.loads(line)
                 except json.JSONDecodeError:
@@ -381,7 +406,7 @@ class SerialConn:
                     try:
                         callback(obj)
                     except Exception as exc:
-                        print(f"[SER] on_json callback error: {exc}")
+                        _log(f"on_json callback error: {exc}")
 
     # ------------------------------- vigilancia -------------------------------
     def _alive_touch(self) -> bool:
@@ -418,6 +443,9 @@ class CommWatcher(threading.Thread):
         self._last_connected = self.serial.is_connected()
         self._last_port = self.serial.port_name
         self._last_door_poll = 0.0
+        self._disconnect_since: Optional[float] = None
+        self._next_attempt = 0.0
+        self._retry_delay = 0.5
 
     # ------------------------------ utilidades --------------------------------
     def _emit(self, callback: Optional[Callable], *args) -> None:
@@ -451,11 +479,15 @@ class CommWatcher(threading.Thread):
         else:
             target = None
         for port in ports:
+            _log(f"Intentando reconectar en {port}")
             if self.serial.connect_with_handshake(port):
+                _log(f"Reconexión OK en {port}")
                 return True
         if not target:
             for port in self.serial.list_ports():
+                _log(f"Intentando reconectar (escaneo) en {port}")
                 if self.serial.connect_with_handshake(port):
+                    _log(f"Reconexión OK en {port}")
                     return True
         return False
 
@@ -479,6 +511,9 @@ class CommWatcher(threading.Thread):
                     current_port = None
 
                 if connected:
+                    self._disconnect_since = None
+                    self._retry_delay = 0.5
+                    self._next_attempt = 0.0
                     if not self._last_connected:
                         self._last_connected = True
                         self._last_port = current_port
@@ -497,13 +532,30 @@ class CommWatcher(threading.Thread):
                         self._last_port = None
                         self._emit(self._on_disconnect)
                         self._last_door_poll = 0.0
+                    now = time.time()
+                    if self._disconnect_since is None:
+                        self._disconnect_since = now
+                        self._retry_delay = 0.5
+                        self._next_attempt = 0.0
 
-                    if not connecting and self._attempt_reconnect(available_ports):
-                        self._last_connected = True
-                        self._last_port = self.serial.port_name
-                        self._last_door_poll = 0.0
-                        if self._last_port:
-                            self._emit(self._on_connect, self._last_port)
+                    if not connecting and now >= self._next_attempt:
+                        if self._attempt_reconnect(available_ports):
+                            self._last_connected = True
+                            self._last_port = self.serial.port_name
+                            self._last_door_poll = 0.0
+                            self._disconnect_since = None
+                            self._retry_delay = 0.5
+                            self._next_attempt = 0.0
+                            if self._last_port:
+                                self._emit(self._on_connect, self._last_port)
+                        else:
+                            # Backoff progresivo tras 60 s desconectado
+                            elapsed = now - self._disconnect_since if self._disconnect_since else 0
+                            if elapsed > 120:
+                                self._retry_delay = max(self._retry_delay, 5.0)
+                            elif elapsed > 60:
+                                self._retry_delay = max(self._retry_delay, 2.0)
+                            self._next_attempt = now + self._retry_delay
             except Exception:
                 if self.serial.is_connected():
                     self.serial.close()
