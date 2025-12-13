@@ -8,7 +8,7 @@ from typing import Optional, Dict
 try:
     from .models import Cycle
     from .storage import list_cycles, load_cycle_from_txt, save_cycle_to_txt, CICLOS_DIR
-    from .serialconn import SerialConn, CommWatcher, BAUDRATE, PREFERRED_PORT, CFG, save_config
+    from unimac_serial.serial_manager import SerialManager, BAUDRATE, PREFERRED_PORT, CFG, save_config
     from .hardware import HardwareIO
     from .executor import Executor
     from .settings import SettingsDialog
@@ -20,7 +20,7 @@ except ImportError:
     sys.path.append(os.path.dirname(os.path.dirname(__file__)))
     from unimac_ui.models import Cycle
     from unimac_ui.storage import list_cycles, load_cycle_from_txt, save_cycle_to_txt, CICLOS_DIR
-    from unimac_ui.serialconn import SerialConn, CommWatcher, BAUDRATE, PREFERRED_PORT, CFG, save_config
+    from unimac_serial.serial_manager import SerialManager, BAUDRATE, PREFERRED_PORT, CFG, save_config
     from unimac_ui.hardware import HardwareIO
     from unimac_ui.executor import Executor
     from unimac_ui.settings import SettingsDialog
@@ -57,18 +57,17 @@ class WasherUI(tk.Tk):
                              padding=((18, 14) if self.is_720p else (22, 16)))
         self.style.configure("Green.Horizontal.TProgressbar", background="#2ecc71")
 
-        # Serial
-        self.serial = SerialConn(baudrate=BAUDRATE, preferred_port=PREFERRED_PORT)
-        self._comm_last_state = self.serial.is_connected()
-        self.serial.set_on_json(self._on_serial_json)
-        self.comm_watcher = CommWatcher(
-            self.serial,
-            poll_sec=0.5,
+        # Serial manager dedicado (hilo daemon con reconexión y handshake)
+        self.serial = SerialManager(
+            baudrate=BAUDRATE,
+            preferred_port=PREFERRED_PORT,
+            on_json=self._on_serial_json,
             on_connect=self._on_comm_connected,
             on_disconnect=self._on_comm_disconnected,
             tk_after=self.after,
         )
-        self.comm_watcher.start()
+        self._comm_last_state = self.serial.is_connected()
+        self.serial.start()
 
         self.CFG = CFG
 
@@ -148,12 +147,6 @@ class WasherUI(tk.Tk):
         self._load_cycle_list()
         self.after(0, self._cache_run_button_size)
         self._sync_run_button_state()
-
-        # Reconexión automática no bloqueante (cuando el puerto aparece tras el arranque)
-        self._auto_conn_job = None
-        self._auto_conn_running = False
-        self._auto_conn_enabled = True
-        self.after(1200, self._auto_connect_tick)
 
         self.after(self.TICK_MS, self._loop_logic)
         self.after(self.COMM_UI_MS, self._update_comm_panel_periodic)
@@ -285,16 +278,11 @@ class WasherUI(tk.Tk):
         ok = self.serial.is_connected()
         self.comm_canvas.itemconfig(self.comm_light, fill="#2ecc71" if ok else "#e74c3c")
         self.comm_status_var.set("Conectado" if ok else "Desconectado")
-        self.comm_port_var.set(self.serial.port_name or (self.serial.preferred_port or "—"))
+        label = getattr(self.serial, "port_label", "") or getattr(self.serial, "port_path", None) or (self.serial.preferred_port or "—")
+        self.comm_port_var.set(label)
 
     def _update_comm_panel_periodic(self):
         self._update_comm_panel_now()
-        try:
-            door = self.serial.status.get("door_closed")
-        except Exception:
-            door = None
-        if door is not self.door_state:
-            self._apply_door_state(door)
         self.after(self.COMM_UI_MS, self._update_comm_panel_periodic)
 
     def _send_event(self, event: str, **kw): self.serial.send_json({"event": event, **kw})
@@ -567,10 +555,7 @@ class WasherUI(tk.Tk):
     def _start_execution(self):
         if self.executor.state in (Executor.RUNNING, Executor.PAUSED, Executor.HOLD):
             self.toast("Ya hay un ciclo en ejecución."); return
-        try:
-            door_status = self.serial.status.get("door_closed")
-        except Exception:
-            door_status = self.door_state
+        door_status = self.door_state
         if door_status is not True or not self.door_locked:
             try:
                 self.toast("La puerta debe estar cerrada y bloqueada para iniciar el ciclo.")
@@ -677,37 +662,19 @@ class WasherUI(tk.Tk):
         save_config(CFG)
 
         if changed:
-            try:
-                self.comm_watcher.stop(); self.comm_watcher.join(timeout=1.0)
-            except Exception: pass
             busy = BusyDialog(self, "Aplicando configuración y reconectando…")
-            import threading
+
             def task():
                 try:
-                    if self.serial.is_connected(): self.serial.close()
-                    ok = False
-                    if self.serial.preferred_port: ok = self.serial.connect(self.serial.preferred_port)
-                    if not ok: self.serial.connect_auto()
+                    self.serial.stop()
+                    self.serial.start()
                 finally:
-                    self.after(0, lambda: self._after_reconnect(busy))
+                    self.after(0, lambda: (busy.destroy(), self._update_comm_panel_now(), self.toast("Conexión actualizada.")))
+
+            import threading
             threading.Thread(target=task, daemon=True).start()
         else:
             self._update_comm_panel_now(); self.toast("Configuración guardada.")
-
-    def _after_reconnect(self, busy):
-        try: busy.destroy()
-        except Exception: pass
-        self._comm_last_state = self.serial.is_connected()
-        self.comm_watcher = CommWatcher(
-            self.serial,
-            poll_sec=0.5,
-            on_connect=self._on_comm_connected,
-            on_disconnect=self._on_comm_disconnected,
-            tk_after=self.after,
-        )
-        self.comm_watcher.start()
-        self._update_comm_panel_now()
-        self.toast("Conexión actualizada.")
 
     # loop/cierre
     def _loop_logic(self):
@@ -736,23 +703,6 @@ class WasherUI(tk.Tk):
         target = not self.door_locked
         self.serial.send_json({"cmd": "door", "lock": target})
 
-    def _auto_connect_tick(self):
-        if not self._auto_conn_enabled:
-            return
-        already_connecting = getattr(self.serial, "is_connecting", lambda: False)()
-        if (not self.serial.is_connected()) and (not self._auto_conn_running) and (not already_connecting):
-            self._auto_conn_running = True
-            import threading
-
-            def task():
-                try:
-                    self.serial.connect_auto()
-                finally:
-                    self.after(0, lambda: setattr(self, "_auto_conn_running", False))
-
-            threading.Thread(target=task, daemon=True).start()
-        self._auto_conn_job = self.after(1500, self._auto_connect_tick)
-
     def _on_comm_connected(self, port: Optional[str]):
         def _cb():
             first = not self._comm_last_state
@@ -780,15 +730,8 @@ class WasherUI(tk.Tk):
         self.after(0, _cb)
 
     def _on_close(self):
-        self._auto_conn_enabled = False
         try:
-            if self._auto_conn_job:
-                self.after_cancel(self._auto_conn_job)
-        except Exception:
-            pass
-        try:
-            self.comm_watcher.stop(); self.comm_watcher.join(timeout=1.0)
-            self.serial.close()
+            self.serial.stop()
         finally:
             self.destroy()
 

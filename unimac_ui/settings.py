@@ -17,9 +17,9 @@ except Exception:
     list_ports = None
 
 try:
-    from .serialconn import SerialConn
-except ImportError:
-    from unimac_ui.serialconn import SerialConn
+    from unimac_serial.serial_manager import SerialManager
+except ImportError:  # pragma: no cover - ruta alternativa
+    SerialManager = None  # type: ignore
 
 
 class KeyboardFrame(ttk.Frame):
@@ -134,7 +134,7 @@ class ScrollFrame(ttk.Frame):
 class SettingsDialog(tk.Toplevel):
     BAUDS = [9600, 19200, 38400, 57600, 115200, 250000]
 
-    def __init__(self, master, serial: SerialConn,
+    def __init__(self, master, serial,
                  on_save: Callable[[Optional[str], Optional[int], Dict[str,int], Dict[str,int], Dict[str,int], int], None]):
         super().__init__(master)
         self.title("Configuración"); self.attributes("-fullscreen", True); self.transient(master)
@@ -349,8 +349,9 @@ class SettingsDialog(tk.Toplevel):
                 ports = [p.device for p in list_ports.comports() if "/dev/ttyAMA0" not in (p.device or "")]
         except Exception:
             pass
-        if not ports and self.serial.port_name:
-            ports=[self.serial.port_name]
+        fallback = getattr(self.serial, "port_path", None)
+        if not ports and fallback:
+            ports=[fallback]
         self.port_cb["values"]=ports
         if self.port_var.get() and self.port_var.get() not in ports and self.port_var.get()!="":
             self.port_var.set(self.port_var.get())
@@ -363,7 +364,10 @@ class SettingsDialog(tk.Toplevel):
         def task():
             try:
                 self.serial.baudrate = sel_baud
-                ok = self.serial.connect_with_handshake(sel_port) if sel_port else self.serial.connect_auto()
+                self.serial.preferred_port = sel_port or self.serial.preferred_port
+                ok = self.serial.connect_once(sel_port)
+                # Garantiza que el hilo siga activo para reconexiones posteriores
+                self.serial.start()
                 self.after(0, lambda: messagebox.showinfo("Conexión","Conectado" if ok else "No se pudo conectar"))
             except Exception as e:
                 self.after(0, lambda: messagebox.showerror("Error", str(e)))

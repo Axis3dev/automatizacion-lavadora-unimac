@@ -10,13 +10,13 @@ from tkinter import ttk
 from typing import Callable
 
 try:
-    from .serialconn import SerialConn
+    from unimac_serial.serial_manager import SerialManager
 except ImportError:  # pragma: no cover - ruta alternativa
-    from unimac_ui.serialconn import SerialConn
+    SerialManager = None  # type: ignore
 
 
 class OutputTestWindow(tk.Toplevel):
-    def __init__(self, master, serial: SerialConn):
+    def __init__(self, master, serial):
         super().__init__(master)
         self.serial = serial
         self.title("Testeo de salidas")
