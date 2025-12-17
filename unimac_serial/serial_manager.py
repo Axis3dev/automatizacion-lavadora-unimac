@@ -19,6 +19,7 @@ except Exception:  # pragma: no cover - entorno sin pyserial
     list_ports = None  # type: ignore
 
 CONFIG_PATH = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "unimac_ui", "config.json"))
+UNIMAC_VIRTUAL_PORT = "/run/unimac/ttyUNIMAC"
 
 
 def load_config() -> dict:
@@ -39,7 +40,7 @@ def save_config(cfg: dict) -> None:
 
 CFG = load_config()
 BAUDRATE = int(CFG.get("baudrate", 115200) or 115200)
-PREFERRED_PORT = CFG.get("serial_port")
+PREFERRED_PORT = UNIMAC_VIRTUAL_PORT
 
 
 # --------------------------- utilidades de logging ---------------------------
@@ -52,65 +53,14 @@ def _log(msg: str) -> None:
 
 # ---------------------------- selección de puerto ----------------------------
 
-def short_port_label(path: str) -> str:
-    base = os.path.basename(path or "")
-    lower = base.lower()
-    label = base
-    if "cp210" in lower:
-        suffix = ""
-        if "port" in lower:
-            idx = lower.rfind("port")
-            if idx >= 0:
-                suffix = base[idx:]
-        if not suffix:
-            # Busca un identificador numérico estable, p.ej. "0001"
-            for token in base.replace("-", "_").split("_"):
-                if token.isdigit() and len(token) >= 3:
-                    suffix = token
-                    break
-        label = f"CP2102-{suffix or 'dev'}"
-    elif "ttyusb0" in lower:
-        label = "ttyUSB0"
-    elif base:
-        label = base
-    return label[:15]
+def short_port_label(path: str, max_len: int = 15) -> str:
+    if len(path) <= max_len:
+        return path
+    return "…" + path[-(max_len - 1):]
 
 
-def _candidate_ports(preferred: Optional[str]) -> Iterable[str]:
-    ports = []
-    if preferred:
-        ports.append(preferred)
-
-    by_id = "/dev/serial/by-id"
-    if os.name != "nt" and os.path.isdir(by_id):
-        try:
-            for name in sorted(os.listdir(by_id)):
-                if "cp2102" not in name.lower() and "cp210" not in name.lower():
-                    continue
-                path = os.path.join(by_id, name)
-                if path not in ports:
-                    ports.append(path)
-        except Exception:
-            pass
-
-    if os.name != "nt":
-        fallback = "/dev/ttyUSB0"
-        if os.path.exists(fallback) and fallback not in ports:
-            ports.append(fallback)
-
-    if list_ports:
-        try:
-            for info in list_ports.comports():
-                dev = getattr(info, "device", None)
-                if not dev:
-                    continue
-                if dev in ports:
-                    continue
-                ports.append(dev)
-        except Exception:
-            pass
-
-    return ports
+def _candidate_ports(_: Optional[str]) -> Iterable[str]:
+    yield UNIMAC_VIRTUAL_PORT
 
 
 # ----------------------------- SerialManager --------------------------------
@@ -233,11 +183,10 @@ class SerialManager:
                         time.sleep(0.2)
                         continue
                     try:
-                        label = short_port_label(port)
                         ts = time.time()
                         if ts - _last_scan_log >= 1.0:
                             _last_scan_log = ts
-                            _log(f"connect attempt port={port} label={label}")
+                            _log(f"Conectando a {port}")
                         if self._try_connect(port):
                             self._retry_delay = 1.0
                             CFG["serial_port"] = self.preferred_port or port
@@ -277,7 +226,7 @@ class SerialManager:
                 pass
             ser = Serial(**kwargs)
         except (SerialException, OSError, ValueError) as exc:
-            _log(f"open failed on {port}: {exc}")
+            _log(f"Error al conectar: {exc}. Reintentando...")
             return False
         try:
             ser.reset_output_buffer()
@@ -292,13 +241,14 @@ class SerialManager:
                 ser.close()
             except Exception:
                 pass
+            _log("Error al conectar: handshake sin respuesta válida. Reintentando...")
             return False
 
         with self._serial_lock:
             self._serial = ser
             self.port_path = port
             self.port_label = short_port_label(port)
-        _log(f"connected port={port}")
+        _log("Conectado OK")
         self._emit_connect(port)
         return True
 
@@ -382,7 +332,7 @@ class SerialManager:
             pass
 
     # ------------------------------ desconexión -------------------------------
-    def _handle_disconnect(self, exc: Exception | None = None) -> None:
+    def _handle_disconnect(self, exc: Optional[Exception] = None) -> None:
         if exc:
             _log(f"disconnected err={exc}")
         self._close_port()
@@ -441,4 +391,5 @@ __all__ = [
     "CFG",
     "BAUDRATE",
     "PREFERRED_PORT",
+    "UNIMAC_VIRTUAL_PORT",
 ]
