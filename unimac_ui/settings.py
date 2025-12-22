@@ -7,14 +7,19 @@ from tkinter import ttk, messagebox
 from typing import Callable, Optional, Dict
 
 try:
+    from .output_test_window import OutputTestWindow
+except Exception:
+    OutputTestWindow = None  # type: ignore
+
+try:
     from serial.tools import list_ports
 except Exception:
     list_ports = None
 
 try:
-    from .serialconn import SerialConn
-except ImportError:
-    from unimac_ui.serialconn import SerialConn
+    from unimac_serial.serial_manager import SerialManager
+except ImportError:  # pragma: no cover - ruta alternativa
+    SerialManager = None  # type: ignore
 
 
 class KeyboardFrame(ttk.Frame):
@@ -68,13 +73,75 @@ class KeyboardFrame(ttk.Frame):
             e.insert("insert", char); e.focus_set()
 
 
+class ScrollFrame(ttk.Frame):
+    """Frame desplazable vertical con Canvas+Scrollbar que aloja un interior ttk.Frame."""
+
+    def __init__(self, master, **kw):
+        super().__init__(master, **kw)
+        self.canvas = tk.Canvas(self, highlightthickness=0)
+        self.vsb = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
+        self.canvas.configure(yscrollcommand=self.vsb.set)
+
+        self.inner = ttk.Frame(self.canvas)
+        self.inner_id = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
+
+        self.canvas.grid(row=0, column=0, sticky="nsew")
+        self.vsb.grid(row=0, column=1, sticky="ns")
+        self.rowconfigure(0, weight=1)
+        self.columnconfigure(0, weight=1)
+
+        self.inner.bind("<Configure>", self._on_inner_configure)
+        self.canvas.bind("<Configure>", self._on_canvas_configure)
+
+        self._bind_mousewheel(self.canvas)
+
+    def _on_inner_configure(self, _):
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+
+    def _on_canvas_configure(self, event):
+        self.canvas.itemconfig(self.inner_id, width=event.width)
+
+    def _bind_mousewheel(self, widget):
+        widget.bind_all("<MouseWheel>", self._on_wheel)
+        widget.bind_all("<Button-4>", self._on_wheel)
+        widget.bind_all("<Button-5>", self._on_wheel)
+
+    def _on_wheel(self, event):
+        if event.num == 4:
+            self.canvas.yview_scroll(-3, "units")
+        elif event.num == 5:
+            self.canvas.yview_scroll(3, "units")
+        else:
+            delta = int(-1 * (event.delta / 40))
+            self.canvas.yview_scroll(delta, "units")
+
+    def scroll_to_bottom(self):
+        self.update_idletasks()
+        self.canvas.yview_moveto(1.0)
+
+    def see(self, widget: tk.Widget):
+        try:
+            self.update_idletasks()
+            inner_height = max(1, self.inner.winfo_height())
+            canvas_height = max(1, self.canvas.winfo_height())
+            widget_y = widget.winfo_y()
+            frac = widget_y / max(1, inner_height - canvas_height)
+            self.canvas.yview_moveto(min(max(frac, 0.0), 1.0))
+        except Exception:
+            pass
+
+
 class SettingsDialog(tk.Toplevel):
     BAUDS = [9600, 19200, 38400, 57600, 115200, 250000]
 
-    def __init__(self, master, serial: SerialConn,
+    def __init__(self, master, serial,
                  on_save: Callable[[Optional[str], Optional[int], Dict[str,int], Dict[str,int], Dict[str,int], int], None]):
         super().__init__(master)
         self.title("Configuración"); self.attributes("-fullscreen", True); self.transient(master)
+        try:
+            self.tk.call('tk', 'scaling', 1.0)
+        except Exception:
+            pass
         self.serial = serial; self.on_save = on_save
         self.CFG = getattr(master, "CFG", {})
 
@@ -83,33 +150,60 @@ class SettingsDialog(tk.Toplevel):
         self.f_field  = tkfont.Font(size=16)
         self.f_button = tkfont.Font(size=18, weight="bold")
 
+        self._output_test_win: Optional[tk.Toplevel] = None
+
         # Comunicación
         self.port_var = tk.StringVar(value=self.serial.preferred_port or "")
         self.baud_var = tk.IntVar(value=int(self.serial.baudrate or 115200))
 
         # Globals
         glb = self.CFG.get("globals", {})
-        fill_def = glb.get("water_fill_seconds", {"ligero":5,"estandar":8,"intenso":12})
-        self.var_ligero   = tk.StringVar(value=str(int(fill_def.get("ligero",5))))
-        self.var_estandar = tk.StringVar(value=str(int(fill_def.get("estandar",8))))
-        self.var_intenso  = tk.StringVar(value=str(int(fill_def.get("intenso",12))))
+        fill_legacy = glb.get("water_fill_seconds", {}) if isinstance(glb.get("water_fill_seconds", {}), dict) else {}
+        dose_legacy = glb.get("chem_dose_seconds", {}) if isinstance(glb.get("chem_dose_seconds", {}), dict) else {}
+        drain_legacy = glb.get("drain_seconds", {}) if isinstance(glb.get("drain_seconds", {}), dict) else {}
 
-        dose_def = glb.get("chem_dose_seconds", {"Q1":4,"Q2":3,"Q3":2,"Q4":2})
-        self.var_q1 = tk.StringVar(value=str(int(dose_def.get("Q1",4))))
-        self.var_q2 = tk.StringVar(value=str(int(dose_def.get("Q2",3))))
-        self.var_q3 = tk.StringVar(value=str(int(dose_def.get("Q3",2))))
-        self.var_q4 = tk.StringVar(value=str(int(dose_def.get("Q4",2))))
+        def _ival(value, default):
+            try:
+                return int(value)
+            except Exception:
+                return default
 
-        drain_def = glb.get("drain_seconds", {"ligero":20,"estandar":30,"intenso":45})
-        self.var_drain_l = tk.StringVar(value=str(int(drain_def.get("ligero",20))))
-        self.var_drain_e = tk.StringVar(value=str(int(drain_def.get("estandar",30))))
-        self.var_drain_i = tk.StringVar(value=str(int(drain_def.get("intenso",45))))
+        self.var_ligero   = tk.StringVar(value=str(_ival(glb.get("fill_seconds_ligero",   fill_legacy.get("ligero", 5)), 5)))
+        self.var_estandar = tk.StringVar(value=str(_ival(glb.get("fill_seconds_estandar", fill_legacy.get("estandar", 8)), 8)))
+        self.var_intenso  = tk.StringVar(value=str(_ival(glb.get("fill_seconds_intenso",  fill_legacy.get("intenso", 12)), 12)))
 
-        alt_def = int(glb.get("alternancia_motor_s", 0))
-        self.var_alt = tk.StringVar(value=str(alt_def))
+        self.var_q1 = tk.StringVar(value=str(_ival(glb.get("chem_seconds_detergente",  dose_legacy.get("Q1", 4)), 4)))
+        self.var_q2 = tk.StringVar(value=str(_ival(glb.get("chem_seconds_quitamanchas", dose_legacy.get("Q2", 3)), 3)))
+        self.var_q3 = tk.StringVar(value=str(_ival(glb.get("chem_seconds_suavizante",   dose_legacy.get("Q3", 2)), 2)))
+        self.var_q4 = tk.StringVar(value=str(_ival(glb.get("chem_seconds_blanqueador",  dose_legacy.get("Q4", 2)), 2)))
 
-        root = ttk.Frame(self, padding=12); root.pack(fill="both", expand=True)
-        main = ttk.Frame(root); main.pack(fill="both", expand=True, pady=(0,8))
+        self.var_drain_l = tk.StringVar(value=str(_ival(glb.get("drain_seconds_ligero",   drain_legacy.get("ligero", 20)), 20)))
+        self.var_drain_e = tk.StringVar(value=str(_ival(glb.get("drain_seconds_estandar", drain_legacy.get("estandar", 30)), 30)))
+        self.var_drain_i = tk.StringVar(value=str(_ival(glb.get("drain_seconds_intenso",  drain_legacy.get("intenso", 45)), 45)))
+
+        try:
+            alt_def = int(glb.get("motor_alt_seconds", glb.get("alternancia_motor_s", 0)) or 0)
+        except Exception:
+            alt_def = 0
+        self.var_alt = tk.StringVar(value=str(max(0, alt_def)))
+
+        try:
+            pause_def = int(glb.get("motor_pause_seconds", 2) or 0)
+        except Exception:
+            pause_def = 2
+        self.var_motor_pause = tk.StringVar(value=str(max(0, pause_def)))
+
+        root = ttk.Frame(self, padding=12)
+        root.pack(fill="both", expand=True)
+        root.rowconfigure(0, weight=1)
+        root.rowconfigure(1, weight=0)
+        root.columnconfigure(0, weight=1)
+
+        scroll = ScrollFrame(root)
+        scroll.grid(row=0, column=0, sticky="nsew", pady=(0, 8))
+        self._scroll = scroll
+
+        main = scroll.inner
         main.columnconfigure(0, weight=1); main.columnconfigure(1, weight=1)
 
         # Comunicación
@@ -182,8 +276,12 @@ class SettingsDialog(tk.Toplevel):
         e_alt = ttk.Entry(varsf, textvariable=self.var_alt, font=self.f_field, width=10, justify="right")
         e_alt.grid(row=15, column=1, sticky="w", pady=4)
 
+        ttk.Label(varsf, text="Pausa entre alternancias (s):", font=self.f_label).grid(row=16, column=0, sticky="w", padx=(0,8), pady=4)
+        e_alt_pause = ttk.Entry(varsf, textvariable=self.var_motor_pause, font=self.f_field, width=10, justify="right")
+        e_alt_pause.grid(row=16, column=1, sticky="w", pady=4)
+
         only_num = (self.register(lambda P: P.isdigit() or P==""), "%P")
-        for ent in (e_l, e_e, e_i, e_q1, e_q2, e_q3, e_q4, e_dl, e_de, e_di, e_alt):
+        for ent in (e_l, e_e, e_i, e_q1, e_q2, e_q3, e_q4, e_dl, e_de, e_di, e_alt, e_alt_pause):
             ent.configure(validate="key", validatecommand=only_num)
             ent.bind("<FocusIn>", lambda ev, widget=ent: self._show_kb(widget))
 
@@ -191,11 +289,17 @@ class SettingsDialog(tk.Toplevel):
         sysf.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0,8))
         ttk.Button(sysf, text="Apagar sistema", command=self._close_app).pack(side="left", padx=(0,8), pady=(4,4))
 
-        bottom = ttk.Frame(root); bottom.pack(fill="x")
+        testsf = ttk.LabelFrame(main, text="Pruebas", padding=12)
+        testsf.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(0,8))
+        ttk.Button(testsf, text="Testeo de salidas", command=self._open_output_tests).pack(side="left", padx=(0,8), pady=(4,4))
+
+        bottom = ttk.Frame(root)
+        bottom.grid(row=1, column=0, sticky="ew")
         ttk.Button(bottom, text="Cancelar", command=self._on_cancel).pack(side="right", padx=(0,8))
         ttk.Button(bottom, text="Guardar", command=self._on_save).pack(side="right", padx=(0,8))
 
-        kbwrap = ttk.Frame(root); kbwrap.pack(fill="x", pady=(6,0))
+        kbwrap = ttk.Frame(main)
+        kbwrap.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(6,0))
         self._focused_entry: Optional[tk.Entry] = None
         self.kb_num = KeyboardFrame(kbwrap, mode="numeric", title="Teclado numérico",
                                     getter=lambda: self._focused_entry, scale=0.95)
@@ -208,7 +312,18 @@ class SettingsDialog(tk.Toplevel):
     # teclado
     def _show_kb(self, entry: tk.Entry):
         self._focused_entry = entry
-        self.kb_num.pack(fill="x"); self.kb_num.lift()
+        try:
+            self.kb_num.pack(fill="x")
+        except Exception:
+            pass
+        try:
+            self.kb_num.lift()
+        except Exception:
+            pass
+        try:
+            self.after(10, self._scroll.scroll_to_bottom)
+        except Exception:
+            pass
     def _hide_kb(self):
         try: self.kb_num.pack_forget()
         except Exception: pass
@@ -234,8 +349,9 @@ class SettingsDialog(tk.Toplevel):
                 ports = [p.device for p in list_ports.comports() if "/dev/ttyAMA0" not in (p.device or "")]
         except Exception:
             pass
-        if not ports and self.serial.port_name:
-            ports=[self.serial.port_name]
+        fallback = getattr(self.serial, "port_path", None)
+        if not ports and fallback:
+            ports=[fallback]
         self.port_cb["values"]=ports
         if self.port_var.get() and self.port_var.get() not in ports and self.port_var.get()!="":
             self.port_var.set(self.port_var.get())
@@ -248,13 +364,41 @@ class SettingsDialog(tk.Toplevel):
         def task():
             try:
                 self.serial.baudrate = sel_baud
-                ok = self.serial.connect(sel_port) if sel_port else self.serial.connect_auto()
+                self.serial.preferred_port = sel_port or self.serial.preferred_port
+                ok = self.serial.connect_once(sel_port)
+                # Garantiza que el hilo siga activo para reconexiones posteriores
+                self.serial.start()
                 self.after(0, lambda: messagebox.showinfo("Conexión","Conectado" if ok else "No se pudo conectar"))
             except Exception as e:
                 self.after(0, lambda: messagebox.showerror("Error", str(e)))
         threading.Thread(target=task, daemon=True).start()
 
     # sistema
+    def _open_output_tests(self):
+        if OutputTestWindow is None:
+            messagebox.showerror("Error", "No se pudo cargar la ventana de pruebas.")
+            return
+        try:
+            if self._output_test_win and self._output_test_win.winfo_exists():
+                self._output_test_win.lift(); self._output_test_win.focus_force()
+                return
+        except Exception:
+            self._output_test_win = None
+        try:
+            self._output_test_win = OutputTestWindow(self, self.serial)
+            self._output_test_win.protocol("WM_DELETE_WINDOW", self._close_output_tests)
+        except Exception as exc:
+            self._output_test_win = None
+            messagebox.showerror("Error", str(exc))
+
+    def _close_output_tests(self):
+        try:
+            if self._output_test_win and self._output_test_win.winfo_exists():
+                self._output_test_win.destroy()
+        except Exception:
+            pass
+        self._output_test_win = None
+
     def _close_app(self):
         try: self.master.destroy()
         except Exception: os._exit(0)
@@ -262,19 +406,26 @@ class SettingsDialog(tk.Toplevel):
 
     def _on_save(self):
         fills={}
-        for key,var in (("ligero",self.var_ligero),("estandar",self.var_estandar),("intenso",self.var_intenso)):
+        for key,var in (("fill_seconds_ligero",self.var_ligero),
+                        ("fill_seconds_estandar",self.var_estandar),
+                        ("fill_seconds_intenso",self.var_intenso)):
             try: v=int(var.get() or "0")
             except Exception: v=0
             fills[key]=max(0,v)
 
         doses={}
-        for key,var in (("Q1",self.var_q1),("Q2",self.var_q2),("Q3",self.var_q3),("Q4",self.var_q4)):
+        for key,var in (("chem_seconds_detergente",self.var_q1),
+                        ("chem_seconds_quitamanchas",self.var_q2),
+                        ("chem_seconds_suavizante",self.var_q3),
+                        ("chem_seconds_blanqueador",self.var_q4)):
             try: v=int(var.get() or "0")
             except Exception: v=0
             doses[key]=max(0,v)
 
         drains={}
-        for key,var in (("ligero",self.var_drain_l),("estandar",self.var_drain_e),("intenso",self.var_drain_i)):
+        for key,var in (("drain_seconds_ligero",self.var_drain_l),
+                        ("drain_seconds_estandar",self.var_drain_e),
+                        ("drain_seconds_intenso",self.var_drain_i)):
             try: v=int(var.get() or "0")
             except Exception: v=0
             drains[key]=max(0,v)
@@ -282,6 +433,15 @@ class SettingsDialog(tk.Toplevel):
         try: alt = int(self.var_alt.get() or "0")
         except Exception: alt = 0
         alt = max(0, alt)
+
+        try:
+            motor_pause = int(self.var_motor_pause.get() or "0")
+        except Exception:
+            motor_pause = 0
+        motor_pause = max(0, motor_pause)
+
+        glb = self.CFG.setdefault("globals", {})
+        glb["motor_pause_seconds"] = motor_pause
 
         port = (self.port_var.get().strip() or None)
         try: baud = int(self.baud_var.get() or 0)

@@ -1,0 +1,4 @@
+nombre=ligero
+temp_agua=fria
+accion=lavado;duracion=300;nivel=estandar;quimicos=detergente;velocidad=bajo
+accion=enjuague;duracion=300;nivel=estandar;quimicos=suavizante;velocidad=bajo
