@@ -1,0 +1,42 @@
+# ====== SALIDAS (ESP32 → Relés/Señales) ======
+# Todos los relés son activos en LOW (setRelay(pin, true) => LOW/energizado)
+
+# Relés de dosificación
+GPIO21 - Q1_DETERGENTE      - salida digital - Activo en LOW
+GPIO19 - Q2_QUITAMANCHAS    - salida digital - Activo en LOW
+GPIO18 - Q3_SUAVIZANTE      - salida digital - Activo en LOW
+GPIO5  - Q4_BLANQUEADOR     - salida digital - Activo en LOW
+
+# Agua / drenaje / puerta
+GPIO17 - V_AF_FRIA (válvula agua fría)      - salida digital - Activo en LOW
+GPIO16 - V_AC_CALIENTE (válvula agua caliente) - salida digital - Activo en LOW
+GPIO22 - DREN_CERRAR (válvula drenaje NA; LOW=abrir, HIGH=cerrar) - salida digital - Activo en LOW
+GPIO23 - LOCK_PUERTA (cerrojo)              - salida digital - Activo en LOW
+
+# Motor / variador (RUN + dirección) y velocidades
+GPIO14 - MOTOR_FWD (contactor reservado, desenergizado por defecto) - salida digital - Activo en LOW
+GPIO27 - MOTOR_REV (contactor reservado, desenergizado por defecto) - salida digital - Activo en LOW
+GPIO26 - VFD_RUN (habilita variador)        - salida digital - Activo en LOW
+GPIO25 - VFD_DIR (dirección variador)       - salida digital - Activo en LOW (LOW=FWD, HIGH=REV)
+
+# Selección de velocidad del VFD
+GPIO33 - SPEED_BAJA   - salida digital - Activo en LOW
+GPIO32 - SPEED_MEDIA  - salida digital - Activo en LOW
+GPIO13 - SPEED_ALTA   - salida digital - Activo en LOW
+
+# Buzzer
+GPIO4  - BUZZER - salida digital - Activo en LOW
+
+# ====== ENTRADAS / RESERVADOS ======
+GPIO15 - DOOR_SWITCH (NC -> LOW cuando la puerta está cerrada) - entrada digital con PULLUP interno
+GPIO0  - RES_IN1 (reservado, entrada digital) - strapping pin (no usar como salida)
+GPIO2  - RES_IN2 (reservado, entrada digital) - strapping pin (no usar como salida)
+
+# Pines eliminados/no usados
+GPIO35 - UNUSED (anterior EMERGENCY_STOP)
+GPIO34 - UNUSED (anterior VFD_FAULT)
+
+# Notas:
+# - NO usar GPIO12 por conflictos de arranque del ESP32.
+# - Relés activos en LOW; reposo en HIGH.
+# - Drenaje es normalmente abierto (NA): LOW = abrir drenaje; HIGH = cerrar drenaje.
