@@ -73,7 +73,7 @@ def load_cycle_from_txt(path: str) -> Cycle:
             nivel = kv.get("nivel")
             qraw = kv.get("quimicos") or ""
             chems = [c.strip() for c in qraw.replace("|", ",").split(",") if c.strip()]
-            vel = kv.get("velocidad")
+            vel = kv.get("velocidad") or "medio"
             pasos.append(Step(acc, dur, nivel, chems, vel))
     return Cycle(nombre, pasos, agua_temp)
 

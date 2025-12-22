@@ -96,6 +96,10 @@ class Executor:
         self._motor_next_dir = "FWD"
         self._motor_is_agitation = False
         self.in_drain_pause = False
+        self._is_filling = False
+        self._fill_remaining = 0
+        self._agitation_active = False
+        self._step_target_speed = "medio"
         self._drain_profile = None
         self._drain_label = None
         self.ui_send_event = getattr(self, "ui_send_event", None)
@@ -226,6 +230,10 @@ class Executor:
         self._drain_profile = None
         self._drain_label = None
         self.current_speed = None
+        self._is_filling = False
+        self._fill_remaining = 0
+        self._agitation_active = False
+        self._step_target_speed = "medio"
 
     def start(self):
         if not self.cycle or not self.cycle.pasos:
@@ -268,7 +276,6 @@ class Executor:
         self.hw.stop_all()
         self.hw.drain_open(True)
         self._send({"cmd": "drain", "open": True})
-        self._send({"cmd": "door", "lock": False})
         self._send_event({"event": "stop"})
         self.cb.on_status("Detenido (paro seguro)")
         self.current_speed = None
@@ -279,7 +286,6 @@ class Executor:
         self.hw.stop_all()
         self.hw.drain_open(True)
         self._send({"cmd": "drain", "open": True})
-        self._send({"cmd": "door", "lock": False})
         self._send_event({"event": "finish"})
         self.cb.on_status("Ciclo terminado")
         self.cb.on_finish()
@@ -327,6 +333,9 @@ class Executor:
 
     # ---------- lógica de tick ----------
     def _tick_step(self):
+        if self._is_filling:
+            self._tick_fill()
+            return
         if self.step_remaining > 0:
             self.step_remaining = max(0, self.step_remaining - 1)
         if self.total_remaining > 0:
@@ -340,8 +349,6 @@ class Executor:
     def _tick_drain(self):
         if self._drain_remaining > 0:
             self._drain_remaining = max(0, self._drain_remaining - 1)
-        if self.total_remaining > 0:
-            self.total_remaining = max(0, self.total_remaining - 1)
 
         if self._drain_remaining <= 0:
             self.hw.drain_open(False)
@@ -364,7 +371,6 @@ class Executor:
         self.hw.stop_all()
         self.hw.drain_open(True)
         self._send({"cmd": "drain", "open": True})
-        self._send({"cmd": "door", "lock": False})
         self._send_event({"event": "emergency"})
         self.cb.on_status("Paro de emergencia")
         self.current_speed = None
@@ -400,6 +406,10 @@ class Executor:
         self._motor_dir = "FWD"
         self._motor_next_dir = "REV"
         self._motor_is_agitation = self._current_action in Executor.WATER_ACTIONS
+        self._agitation_active = self._current_action in Executor.SPIN_ACTIONS
+        self._is_filling = False
+        self._fill_remaining = 0
+        self._step_target_speed = self._motor_speed
 
         self.step_remaining = max(1, self._safe_int(getattr(step, "duracion", 0), 1))
         self._mode = Executor._MODE_STEP
@@ -414,14 +424,15 @@ class Executor:
             "duracion": self.step_remaining,
             "nivel": getattr(step, "nivel_agua", None),
             "quimicos": list(getattr(step, "quimicos", []) or []),
-            "velocidad": getattr(step, "velocidad", None),
+            # Velocidad ya normalizada que se envía al ESP32
+            "velocidad": self._motor_speed,
         }
         self._send_event(payload)
 
         self.hw.stop_all()
 
         if self._current_action in Executor.WATER_ACTIONS:
-            self._apply_speed_for_step(step)
+            self._apply_speed_for_step(step, force=True)
             self._start_water_step(step)
         elif self._current_action in Executor.SPIN_ACTIONS:
             self._start_spin_step(step)
@@ -464,14 +475,14 @@ class Executor:
             self._send({"cmd": "chem", "id": ident, "t_s": secs})
             self._send_event({"event": "chem", "id": ident, "seconds": secs})
 
-        self._start_motor()
+        self._begin_fill_phase(fill_seconds)
 
     def _start_spin_step(self, step):
         print(f"[EXEC] Iniciando centrifugado")
         self.hw.drain_open(False)
         self._send({"cmd": "drain", "open": False})
         self._send_event({"event": "drain", "open": False, "seconds": self.step_remaining})
-        speed = self._apply_speed_for_step(step)
+        speed = self._apply_speed_for_step(step, force=True)
         self.hw.spin(speed)
         self._set_motor(True, direction="FWD")
 
@@ -482,12 +493,9 @@ class Executor:
         self._send({"cmd": "drain", "open": True})
         self._send_event({"event": "drain", "open": True, "seconds": self.step_remaining})
 
-    def _apply_speed_for_step(self, step) -> str:
-        default_speed = "alto" if self._current_action in Executor.SPIN_ACTIONS else "medio"
-        raw_speed = getattr(step, "velocidad", None) or default_speed
-        normalized = self._normalize_speed(raw_speed)
-        self._motor_speed = normalized
-        if normalized != self.current_speed:
+    def _send_speed_command(self, level: str, force: bool = False) -> str:
+        normalized = self._normalize_speed(level)
+        if force or normalized != self.current_speed:
             self.current_speed = normalized
             self._send({"cmd": "vfd_speed", "level": normalized})
             dispatcher = getattr(self, "ui_send_event", None)
@@ -497,11 +505,23 @@ class Executor:
                 self._send_event({"event": "speed", "nivel": normalized})
         return normalized
 
+    def _apply_speed_for_step(self, step, force: bool = False) -> str:
+        default_speed = "alto" if self._current_action in Executor.SPIN_ACTIONS else "medio"
+        raw_speed = getattr(step, "velocidad", None) or default_speed
+        normalized = self._normalize_speed(raw_speed)
+        self._motor_speed = normalized
+        force_send = force or getattr(step, "velocidad", None) is not None or normalized != self.current_speed
+        return self._send_speed_command(normalized, force=force_send)
+
     def _resume_current_step(self):
         if not self._current_step:
             return
         if self._current_action in Executor.WATER_ACTIONS:
-            self._start_motor()
+            if self._is_filling:
+                self._send_speed_command("bajo", force=True)
+                self._set_motor(True, direction="FWD")
+            else:
+                self._start_motor()
         elif self._current_action in Executor.SPIN_ACTIONS:
             self._set_motor(True, direction=self._motor_dir)
 
@@ -551,6 +571,7 @@ class Executor:
         self._motor_pause_timer = 0
         self._motor_pause_active = False
         self._motor_next_dir = "REV"
+        self._agitation_active = True
         self._set_motor(True, direction=self._motor_dir)
 
     def _set_motor(self, run: bool, direction: Optional[str] = None):
@@ -558,6 +579,8 @@ class Executor:
             self._motor_dir = direction
         self._motor_running = run
         if run:
+            # Garantizar que la velocidad esté aplicada justo antes de arrancar el motor
+            self._send_speed_command(self._motor_speed, force=True)
             event = "motor_fwd" if self._motor_dir == "FWD" else "motor_rev"
             cmd_dir = "FWD" if self._motor_dir == "FWD" else "REV"
         else:
@@ -567,7 +590,7 @@ class Executor:
         self._send_event({"event": event})
 
     def _update_motor_alt(self):
-        if not self._motor_is_agitation:
+        if not self._motor_is_agitation or not self._agitation_active:
             return
         if self._motor_interval <= 0:
             return
@@ -612,10 +635,36 @@ class Executor:
     def on_serial_reconnected(self):
         if not self.current_speed:
             return
-        self._send({"cmd": "vfd_speed", "level": self.current_speed})
-        dispatcher = getattr(self, "ui_send_event", None)
-        if callable(dispatcher):
-            dispatcher("speed", valor=self.current_speed)
-        else:
-            self._send_event({"event": "speed", "nivel": self.current_speed})
+        self._send_speed_command(self.current_speed, force=True)
+
+    # ---------- llenado y fases previas a agitación ----------
+    def _begin_fill_phase(self, fill_seconds: int) -> None:
+        self._fill_remaining = max(0, int(fill_seconds or 0))
+        self._is_filling = self._fill_remaining > 0
+        if not self._is_filling:
+            self._start_motor()
+            return
+
+        # Mezcla durante el llenado: giro FWD a velocidad baja sin consumir tiempo de paso
+        target_speed = self._step_target_speed or self._motor_speed
+        self._motor_speed = "bajo"
+        self._send_speed_command("bajo", force=True)
+        self._set_motor(True, direction="FWD")
+        self._motor_speed = target_speed
+
+    def _tick_fill(self):
+        if self._fill_remaining > 0:
+            self._fill_remaining = max(0, self._fill_remaining - 1)
+        if self._fill_remaining <= 0:
+            self._finish_fill_phase()
+
+    def _finish_fill_phase(self):
+        if not self._is_filling:
+            return
+        self._is_filling = False
+        self._agitation_active = False
+        # Aplicar la velocidad configurada para la etapa de agitación y arrancar alternancias
+        self._set_motor(False)
+        self._motor_speed = self._step_target_speed or self._motor_speed
+        self._start_motor()
 

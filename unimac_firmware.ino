@@ -22,8 +22,6 @@ const uint8_t REL_SPEED_ALTA     = 13;
 // ======================================================
 
 // ====== INPUT PINS ======
-const uint8_t PIN_EMERGENCY    = 35;
-const uint8_t PIN_VFD_FAULT    = 34;
 const uint8_t PIN_RES_IN1      = 0;
 const uint8_t PIN_RES_IN2      = 2;
 
@@ -180,22 +178,27 @@ void setSpeedPresets(const String &nivel) {
 }
 
 void setMotor(const String &dirRaw) {
+  // Mapeo explícito para variador:
+  //  - REL_VFD_RUN: única salida de RUN (LOW = variador habilitado)
+  //  - REL_VFD_DIR: solo dirección (LOW = FWD, HIGH = REV)
+  //  - REL_MOTOR_FWD / REL_MOTOR_REV: reservados para contactores externos; se mantienen apagados.
   String dir = dirRaw;
   dir.toUpperCase();
+
+  // Desenergizar contactores físicos (no se usan en esta versión)
+  setRelay(REL_MOTOR_FWD, false);
+  setRelay(REL_MOTOR_REV, false);
+
   if (dir == "FWD") {
-    setRelay(REL_MOTOR_REV, false);
-    setRelay(REL_MOTOR_FWD, true);
-    setRelay(REL_VFD_DIR, false);
-    setRelay(REL_VFD_RUN, true);
+    setRelay(REL_VFD_DIR, false);  // LOW -> sentido normal
+    setRelay(REL_VFD_RUN, true);   // habilita RUN
   } else if (dir == "REV") {
-    setRelay(REL_MOTOR_FWD, false);
-    setRelay(REL_MOTOR_REV, true);
-    setRelay(REL_VFD_DIR, true);
-    setRelay(REL_VFD_RUN, true);
+    setRelay(REL_VFD_DIR, true);   // HIGH -> sentido inverso
+    setRelay(REL_VFD_RUN, true);   // habilita RUN
   } else {
-    setRelay(REL_MOTOR_FWD, false);
-    setRelay(REL_MOTOR_REV, false);
-    setRelay(REL_VFD_RUN, false);
+    // STOP: apagar RUN y desactivar todas las velocidades
+    setRelay(REL_VFD_RUN, false);  // STOP: RUN deshabilitado
+    speedNone();
   }
 }
 
@@ -266,7 +269,9 @@ void buzzerOff() {
 }
 
 void doorLock(bool lock) {
-  setRelay(REL_DOOR_LOCK, lock);
+  // lock = true  -> relé OFF (bobina sin energía) -> puerta bloqueada (vástago afuera)
+  // lock = false -> relé ON  (bobina energizada)  -> puerta desbloqueada (vástago retraído)
+  setRelay(REL_DOOR_LOCK, !lock);
 }
 
 void allSafeOff() {
@@ -534,6 +539,7 @@ void handleLegacyVfd(JsonObject obj) {
     setRelay(REL_VFD_RUN, true);
   } else {
     setRelay(REL_VFD_RUN, false);
+    speedNone();  // velocidad en reposo
   }
 
   StaticJsonDocument<160> ack;
@@ -625,6 +631,8 @@ void handleCommand(JsonObject obj) {
 // ====== SETUP & LOOP ======
 void setup() {
   Serial.begin(115200);
+  // Pequeño respiro para que el host enumere el puerto y lea los primeros prints
+  delay(100);
 
   Serial.println(F("[PINMAP] Q1=21 Q2=19 Q3=18 Q4=5 COLD=17 HOT=16 DRAIN=22 DOOR=23"));
   Serial.println(F("[PINMAP] FWD=14 REV=27 RUN=26 DIR=25 SLOW=33 MED=32 FAST=13 BUZ=4"));
@@ -653,8 +661,6 @@ void setup() {
     setRelay(pin, false);
   }
 
-  pinMode(PIN_EMERGENCY, INPUT);
-  pinMode(PIN_VFD_FAULT, INPUT);
   pinMode(PIN_RES_IN1, INPUT);
   pinMode(PIN_RES_IN2, INPUT);
   pinMode(IN_DOOR, INPUT_PULLUP);
@@ -667,7 +673,6 @@ void setup() {
   lastDoorReportMs = millis();
 
   allSafeOff();
-  setSpeedPresets(speedNivel);
 
   sendDoorState();
 
@@ -695,18 +700,25 @@ void loop() {
   if (closedRaw != doorSampleClosed) {
     doorSampleClosed = closedRaw;
     doorDebounceAt = now;
-  } else if ((now - doorDebounceAt) > DOOR_DEBOUNCE_MS && closedRaw != doorClosed) {
-    doorClosed = closedRaw;
   }
 
-  bool changed = doorClosed != lastDoorClosed;
-  if (changed || (now - lastDoorReportMs) > 1000) {
-    lastDoorReportMs = now;
-    lastDoorClosed = doorClosed;
-    sendDoorState();
-    if (changed && !doorClosed) {
+  bool doorChanged = false;
+  if ((now - doorDebounceAt) > DOOR_DEBOUNCE_MS && closedRaw != doorClosed) {
+    doorClosed = closedRaw;
+    doorChanged = true;
+  }
+
+  if (doorChanged) {
+    if (!doorClosed) {
+      // Paro seguro inmediato si la puerta pasa a abierta
       allSafeOff();
     }
+    sendDoorState();
+    lastDoorReportMs = now;
+    lastDoorClosed = doorClosed;
+  } else if ((now - lastDoorReportMs) > 1000) {
+    sendDoorState();
+    lastDoorReportMs = now;
   }
 
   if (fillColdActive && now >= fillColdUntil) {
@@ -733,21 +745,4 @@ void loop() {
     buzzerOff();
   }
 
-  bool emergency = digitalRead(PIN_EMERGENCY) == HIGH;
-  if (emergency) {
-    allSafeOff();
-    StaticJsonDocument<96> status;
-    status["status"] = "emergency";
-    sendJson(status);
-    delay(100);
-  }
-
-  bool vfdFault = digitalRead(PIN_VFD_FAULT) == HIGH;
-  if (vfdFault) {
-    motorStop();
-    StaticJsonDocument<96> status;
-    status["status"] = "vfd_fault";
-    sendJson(status);
-    delay(100);
-  }
 }

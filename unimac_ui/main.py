@@ -8,7 +8,7 @@ from typing import Optional, Dict
 try:
     from .models import Cycle
     from .storage import list_cycles, load_cycle_from_txt, save_cycle_to_txt, CICLOS_DIR
-    from .serialconn import SerialConn, CommWatcher, BAUDRATE, PREFERRED_PORT, CFG, save_config
+    from unimac_serial.serial_manager import SerialManager, BAUDRATE, PREFERRED_PORT, CFG, save_config
     from .hardware import HardwareIO
     from .executor import Executor
     from .settings import SettingsDialog
@@ -20,7 +20,7 @@ except ImportError:
     sys.path.append(os.path.dirname(os.path.dirname(__file__)))
     from unimac_ui.models import Cycle
     from unimac_ui.storage import list_cycles, load_cycle_from_txt, save_cycle_to_txt, CICLOS_DIR
-    from unimac_ui.serialconn import SerialConn, CommWatcher, BAUDRATE, PREFERRED_PORT, CFG, save_config
+    from unimac_serial.serial_manager import SerialManager, BAUDRATE, PREFERRED_PORT, CFG, save_config
     from unimac_ui.hardware import HardwareIO
     from unimac_ui.executor import Executor
     from unimac_ui.settings import SettingsDialog
@@ -57,18 +57,17 @@ class WasherUI(tk.Tk):
                              padding=((18, 14) if self.is_720p else (22, 16)))
         self.style.configure("Green.Horizontal.TProgressbar", background="#2ecc71")
 
-        # Serial
-        self.serial = SerialConn(baudrate=BAUDRATE, preferred_port=PREFERRED_PORT)
-        self._comm_last_state = self.serial.is_connected()
-        self.comm_watcher = CommWatcher(
-            self.serial,
-            poll_sec=0.5,
+        # Serial manager dedicado (hilo daemon con reconexión y handshake)
+        self.serial = SerialManager(
+            baudrate=BAUDRATE,
+            preferred_port=PREFERRED_PORT,
+            on_json=self._on_serial_json,
             on_connect=self._on_comm_connected,
             on_disconnect=self._on_comm_disconnected,
             tk_after=self.after,
         )
-        self.comm_watcher.start()
-        self.serial.set_on_json(self._on_serial_json)
+        self._comm_last_state = self.serial.is_connected()
+        self.serial.start()
 
         self.CFG = CFG
 
@@ -126,6 +125,8 @@ class WasherUI(tk.Tk):
         # Estado puerta / control ejecución
         self.door_state: Optional[bool] = None
         self.door_var = tk.StringVar(value="Puerta: —")
+        self.door_locked: bool = True
+        self.door_btn_text = tk.StringVar(value="Desbloquear puerta")
         self.run_btn_text = tk.StringVar(value="▶  Ejecutar")
         self._run_btn_default_text = self.run_btn_text.get()
         self._run_btn_normal_foreground = ""
@@ -227,6 +228,9 @@ class WasherUI(tk.Tk):
         self.btn_stop  = ttk.Button(controls, text="■  Detener", style="Ctrl.TButton",
                                     command=self._stop_execution, state="disabled")
         self.btn_stop.pack(side="left")
+        self.btn_door = ttk.Button(controls, textvariable=self.door_btn_text, style="Ctrl.TButton",
+                                    command=self._toggle_door_lock)
+        self.btn_door.pack(side="right")
 
         footer = ttk.Frame(root); footer.pack(fill="x", pady=(4,0))
         ttk.Label(footer, textvariable=self.current_step_name, font=("Segoe UI", 12 if self.is_720p else 14, "bold")).pack(anchor="w", pady=(0,2))
@@ -274,16 +278,11 @@ class WasherUI(tk.Tk):
         ok = self.serial.is_connected()
         self.comm_canvas.itemconfig(self.comm_light, fill="#2ecc71" if ok else "#e74c3c")
         self.comm_status_var.set("Conectado" if ok else "Desconectado")
-        self.comm_port_var.set(self.serial.port_name or (self.serial.preferred_port or "—"))
+        label = getattr(self.serial, "port_label", "") or getattr(self.serial, "port_path", None) or (self.serial.preferred_port or "—")
+        self.comm_port_var.set(label)
 
     def _update_comm_panel_periodic(self):
         self._update_comm_panel_now()
-        try:
-            door = self.serial.status.get("door_closed")
-        except Exception:
-            door = None
-        if door is not self.door_state:
-            self._apply_door_state(door)
         self.after(self.COMM_UI_MS, self._update_comm_panel_periodic)
 
     def _send_event(self, event: str, **kw): self.serial.send_json({"event": event, **kw})
@@ -308,6 +307,10 @@ class WasherUI(tk.Tk):
             closed_val = data.get("closed")
             closed_state = None if closed_val is None else bool(closed_val)
             self._apply_door_state(closed_state)
+        elif data.get("ack") == "door":
+            if "lock" in data:
+                self.door_locked = bool(data.get("lock"))
+            self._sync_door_button_state()
         elif event == "blocked":
             if data.get("reason") == "door_open":
                 self.toast("Operación bloqueada: puerta abierta.")
@@ -458,13 +461,14 @@ class WasherUI(tk.Tk):
             pass
 
         if state is False and self.executor.state in (Executor.RUNNING, Executor.PAUSED, Executor.HOLD):
-            self._stop_execution()
+            self._stop_execution(reason="Paro por puerta abierta")
             try:
                 self.toast("⚠ Puerta abierta: ciclo detenido.")
             except Exception:
                 messagebox.showwarning("Puerta abierta", "Ciclo detenido por seguridad.")
 
         self._sync_run_button_state()
+        self._sync_door_button_state()
 
     def _sync_run_button_state(self):
         if not getattr(self, "btn_run", None):
@@ -472,7 +476,7 @@ class WasherUI(tk.Tk):
         desired_state = "normal"
         if self.executor.state in (Executor.RUNNING, Executor.PAUSED, Executor.HOLD):
             desired_state = "disabled"
-        elif self.door_state is not True:
+        elif self.door_state is not True or not self.door_locked:
             desired_state = "disabled"
         self.run_btn_text.set(self._run_btn_default_text)
         try:
@@ -481,6 +485,21 @@ class WasherUI(tk.Tk):
             pass
         try:
             self.btn_run.configure(foreground=self._run_btn_normal_foreground or "")
+        except Exception:
+            pass
+
+    def _sync_door_button_state(self):
+        if not getattr(self, "btn_door", None):
+            return
+        try:
+            self.door_btn_text.set("Desbloquear puerta" if self.door_locked else "Bloquear puerta")
+        except Exception:
+            pass
+        state = "normal"
+        if self.executor.state in (Executor.RUNNING, Executor.PAUSED, Executor.HOLD):
+            state = "disabled"
+        try:
+            self.btn_door.configure(state=state)
         except Exception:
             pass
 
@@ -517,6 +536,7 @@ class WasherUI(tk.Tk):
         self._latched_total_steps = 0
         self._set_run_ui_lock(False)
         self._sync_run_button_state()
+        self._sync_door_button_state()
 
     def _center_window(self, win: tk.Toplevel) -> None:
         try:
@@ -535,15 +555,12 @@ class WasherUI(tk.Tk):
     def _start_execution(self):
         if self.executor.state in (Executor.RUNNING, Executor.PAUSED, Executor.HOLD):
             self.toast("Ya hay un ciclo en ejecución."); return
-        try:
-            door_status = self.serial.status.get("door_closed")
-        except Exception:
-            door_status = self.door_state
-        if door_status is not True:
+        door_status = self.door_state
+        if door_status is not True or not self.door_locked:
             try:
-                self.toast("Cierra la puerta para continuar.")
+                self.toast("La puerta debe estar cerrada y bloqueada para iniciar el ciclo.")
             except Exception:
-                messagebox.showwarning("Puerta abierta", "Cierra la puerta para continuar.")
+                messagebox.showwarning("Puerta abierta", "La puerta debe estar cerrada y bloqueada para iniciar el ciclo.")
             return
         if not self.selected_cycle:
             self.toast("Selecciona un ciclo primero."); return
@@ -558,6 +575,7 @@ class WasherUI(tk.Tk):
         self.btn_pause.config(state="normal", text="⏸  Pausar")
         self.btn_stop.config(state="normal")
         self._sync_run_button_state()
+        self._sync_door_button_state()
 
     def _pause_resume(self):
         self.executor.pause()
@@ -566,7 +584,7 @@ class WasherUI(tk.Tk):
         else:
             self.btn_pause.config(text="⏸  Pausar")
 
-    def _stop_execution(self):
+    def _stop_execution(self, reason: Optional[str] = None):
         self.executor.stop()
         self.btn_pause.config(state="disabled")
         self.btn_stop.config(state="disabled")
@@ -575,6 +593,12 @@ class WasherUI(tk.Tk):
         self._latched_total_steps = 0
         self._set_run_ui_lock(False)
         self._sync_run_button_state()
+        self._sync_door_button_state()
+        if reason:
+            try:
+                self.status.config(text=f"Estado actual: {reason}")
+            except Exception:
+                pass
 
     # settings
     def _open_settings(self):
@@ -638,37 +662,19 @@ class WasherUI(tk.Tk):
         save_config(CFG)
 
         if changed:
-            try:
-                self.comm_watcher.stop(); self.comm_watcher.join(timeout=1.0)
-            except Exception: pass
             busy = BusyDialog(self, "Aplicando configuración y reconectando…")
-            import threading
+
             def task():
                 try:
-                    if self.serial.is_connected(): self.serial.close()
-                    ok = False
-                    if self.serial.preferred_port: ok = self.serial.connect(self.serial.preferred_port)
-                    if not ok: self.serial.connect_auto()
+                    self.serial.stop()
+                    self.serial.start()
                 finally:
-                    self.after(0, lambda: self._after_reconnect(busy))
+                    self.after(0, lambda: (busy.destroy(), self._update_comm_panel_now(), self.toast("Conexión actualizada.")))
+
+            import threading
             threading.Thread(target=task, daemon=True).start()
         else:
             self._update_comm_panel_now(); self.toast("Configuración guardada.")
-
-    def _after_reconnect(self, busy):
-        try: busy.destroy()
-        except Exception: pass
-        self._comm_last_state = self.serial.is_connected()
-        self.comm_watcher = CommWatcher(
-            self.serial,
-            poll_sec=0.5,
-            on_connect=self._on_comm_connected,
-            on_disconnect=self._on_comm_disconnected,
-            tk_after=self.after,
-        )
-        self.comm_watcher.start()
-        self._update_comm_panel_now()
-        self.toast("Conexión actualizada.")
 
     # loop/cierre
     def _loop_logic(self):
@@ -690,6 +696,12 @@ class WasherUI(tk.Tk):
                     btn.configure(state=state)
                 except Exception:
                     pass
+
+    def _toggle_door_lock(self):
+        if self.executor.state in (Executor.RUNNING, Executor.PAUSED, Executor.HOLD):
+            return
+        target = not self.door_locked
+        self.serial.send_json({"cmd": "door", "lock": target})
 
     def _on_comm_connected(self, port: Optional[str]):
         def _cb():
@@ -719,8 +731,7 @@ class WasherUI(tk.Tk):
 
     def _on_close(self):
         try:
-            self.comm_watcher.stop(); self.comm_watcher.join(timeout=1.0)
-            self.serial.close()
+            self.serial.stop()
         finally:
             self.destroy()
 

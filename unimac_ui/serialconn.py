@@ -5,7 +5,7 @@ import json
 import os
 import threading
 import time
-from typing import Callable, Iterable, Optional
+from typing import Callable, Iterable, Optional, Tuple
 
 try:
     from serial import Serial, SerialException  # type: ignore
@@ -48,6 +48,10 @@ def _is_blocked_port(port: Optional[str]) -> bool:
     return port == BLOCKED_PORTS[0] or port.endswith(BLOCKED_PORTS[1])
 
 
+def _log(msg: str) -> None:
+    print(f"[SERIAL] {msg}")
+
+
 class SerialConn:
     """Wrapper mínima sobre pyserial con autoconexión y envío JSON."""
 
@@ -56,33 +60,104 @@ class SerialConn:
         self.preferred_port = preferred_port
         self._serial: Optional[Serial] = None
         self._lock = threading.Lock()
+        self._connect_lock = threading.Lock()
+        self._connect_in_progress = False
         self.port_name: Optional[str] = None
+        self._last_ports_repr: Optional[str] = None
         self._on_json: Optional[Callable[[dict], None]] = None
         self._reader_thread: Optional[threading.Thread] = None
         self._reader_stop: Optional[threading.Event] = None
         self.status: dict = {"door_closed": None}
 
     # ------------------------------- utilidades -------------------------------
-    def list_ports(self) -> Iterable[str]:
+    def _candidate_infos(self) -> Tuple[list, list]:
+        preferred: list[str] = []
+        others: list[Tuple[int, str]] = []
+
+        if self.preferred_port and not _is_blocked_port(self.preferred_port):
+            preferred.append(self.preferred_port)
+
+        # Primero los enlaces estables de /dev/serial/by-id si existen
+        by_id_base = "/dev/serial/by-id"
+        if os.path.isdir(by_id_base):
+            try:
+                for name in sorted(os.listdir(by_id_base)):
+                    path = os.path.join(by_id_base, name)
+                    if not os.path.exists(path):
+                        continue
+                    preferred.append(path)
+            except Exception:
+                pass
+
         if list_ports is None:
-            return []
+            return preferred, []
+
         try:
-            ports = [p.device for p in list_ports.comports()]
+            for info in list_ports.comports():
+                dev = getattr(info, "device", None)
+                if not dev or _is_blocked_port(dev):
+                    continue
+                desc = (getattr(info, "description", "") or "").lower()
+                vid = getattr(info, "vid", None)
+                score = 0
+                if vid in (0x1A86, 0x10C4, 0x303A):
+                    score -= 2
+                if "usb" in desc or "serial" in desc or "uart" in desc:
+                    score -= 1
+                others.append((score, dev))
         except Exception:
-            ports = []
-        return [p for p in ports if not _is_blocked_port(p)]
+            pass
+
+        others.sort()
+        return preferred, [dev for _, dev in others]
+
+    def list_ports(self) -> Iterable[str]:
+        preferred, others = self._candidate_infos()
+        ordered = []
+        for dev in preferred:
+            if dev not in ordered:
+                ordered.append(dev)
+        for dev in others:
+            if dev not in ordered:
+                ordered.append(dev)
+        repr_ports = ",".join(ordered)
+        if repr_ports != self._last_ports_repr:
+            self._last_ports_repr = repr_ports
+            _log(f"Puertos detectados: {ordered}")
+        return ordered
 
     def is_connected(self) -> bool:
         with self._lock:
             ser = self._serial
         return bool(ser and ser.is_open)
 
+    def is_connecting(self) -> bool:
+        return self._connect_in_progress
+
+    def _begin_connect(self) -> bool:
+        if not self._connect_lock.acquire(blocking=False):
+            return False
+        self._connect_in_progress = True
+        return True
+
+    def _end_connect(self) -> None:
+        self._connect_in_progress = False
+        try:
+            self._connect_lock.release()
+        except Exception:
+            pass
+
     # ------------------------------- conexión --------------------------------
-    def connect(self, port: str) -> bool:
+    def connect(self, port: str, *, guarded: bool = True) -> bool:
+        if guarded and not self._begin_connect():
+            return False
         if _is_blocked_port(port) or Serial is None:
+            if guarded:
+                self._end_connect()
             return False
 
         try:
+            _log(f"Abriendo puerto {port} @ {self.baudrate} bps")
             ser = Serial(
                 port=port,
                 baudrate=self.baudrate,
@@ -92,6 +167,8 @@ class SerialConn:
             ser.reset_input_buffer()
             ser.reset_output_buffer()
         except (SerialException, OSError, ValueError):
+            if guarded:
+                self._end_connect()
             return False
 
         with self._lock:
@@ -107,16 +184,113 @@ class SerialConn:
         CFG["baudrate"] = self.baudrate
         save_config(CFG)
         self._start_reader()
+        if guarded:
+            self._end_connect()
+        return True
+
+    def _probe_port(self, port: str, timeout: float = 1.8) -> Tuple[bool, Optional[bool]]:
+        if Serial is None:
+            return False, None
+        try:
+            _log(f"Probar handshake en {port}")
+            ser = Serial(
+                port=port,
+                baudrate=self.baudrate,
+                timeout=0.12,
+                write_timeout=0.3,
+                rtscts=False,
+                dsrdtr=False,
+            )
+        except (SerialException, OSError, ValueError):
+            return False, None
+        try:
+            ser.reset_output_buffer()
+        except Exception:
+            pass
+        try:
+            ser.reset_input_buffer()
+        except Exception:
+            pass
+        try:
+            ser.setDTR(False)
+            ser.setRTS(False)
+        except Exception:
+            pass
+        try:
+            ser.write(b'{"cmd":"door?"}\n')
+            ser.flush()
+        except Exception:
+            pass
+
+        found = False
+        door_state: Optional[bool] = None
+        buf = bytearray()
+        deadline = time.time() + max(0.3, float(timeout))
+        while time.time() < deadline:
+            try:
+                chunk = ser.read(max(1, ser.in_waiting or 0))
+            except (SerialException, OSError):
+                break
+            if chunk:
+                buf.extend(chunk)
+                while b"\n" in buf:
+                    raw, _, buf = buf.partition(b"\n")
+                    line = raw.strip().decode("utf-8", errors="ignore")
+                    if not line:
+                        continue
+                    if "\"boot\"" in line or "[PINMAP" in line or "\"event\":\"door\"" in line:
+                        found = True
+                    try:
+                        obj = json.loads(line)
+                    except Exception:
+                        obj = None
+                    if isinstance(obj, dict):
+                        if obj.get("boot") == "ok":
+                            found = True
+                        if obj.get("event") == "door" and "closed" in obj:
+                            door_state = bool(obj.get("closed"))
+                            found = True
+            else:
+                time.sleep(0.05)
+        try:
+            ser.close()
+        except Exception:
+            pass
+        _log(f"Handshake {'OK' if found else 'falló'} en {port} (door={door_state})")
+        return found, door_state
+
+    def connect_with_handshake(self, port: str, *, guarded: bool = True) -> bool:
+        if guarded and not self._begin_connect():
+            return False
+        ok, door_state = self._probe_port(port)
+        if not ok:
+            if guarded:
+                self._end_connect()
+            return False
+        if not self.connect(port, guarded=False):
+            if guarded:
+                self._end_connect()
+            return False
+        _log(f"Conectado a {port}")
+        if door_state is not None:
+            self.status["door_closed"] = door_state
+            self.status["door_ts"] = time.time()
+        else:
+            self.send_json({"cmd": "door?"})
+        if guarded:
+            self._end_connect()
         return True
 
     def connect_auto(self) -> bool:
-        if self.preferred_port and not _is_blocked_port(self.preferred_port):
-            if self.connect(self.preferred_port):
-                return True
-        for port in self.list_ports():
-            if self.connect(port):
-                return True
-        return False
+        if not self._begin_connect():
+            return False
+        try:
+            for port in self.list_ports():
+                if self.connect_with_handshake(port, guarded=False):
+                    return True
+            return False
+        finally:
+            self._end_connect()
 
     def close(self) -> None:
         with self._lock:
@@ -145,7 +319,7 @@ class SerialConn:
     # -------------------------------- envío ----------------------------------
     def send_json(self, payload: dict) -> bool:
         if not self.is_connected():
-            print("[SER] drop send_json: not connected")
+            _log("drop send_json: not connected")
             return False
         try:
             line = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
@@ -155,17 +329,17 @@ class SerialConn:
         with self._lock:
             ser = self._serial
         if not ser or not ser.is_open:
-            print("[SER] drop send_json: port closed")
+            _log("drop send_json: port closed")
             return False
         try:
             with self._lock:
                 ser.write(data)
                 ser.flush()
         except (SerialException, OSError) as exc:
-            print(f"[SER] write error: {exc}")
+            _log(f"write error: {exc}")
             self.close()
             return False
-        print(f"[SER→ESP] {line}")
+        _log(f"SER→ESP {line}")
         return True
 
     # --------------------------------- JSON RX ---------------------------------
@@ -192,7 +366,7 @@ class SerialConn:
             try:
                 waiting = ser.in_waiting
             except (SerialException, OSError) as exc:
-                print(f"[SER] in_waiting error: {exc}")
+                _log(f"in_waiting error: {exc}")
                 self.close()
                 time.sleep(0.2)
                 continue
@@ -202,7 +376,7 @@ class SerialConn:
             try:
                 data = ser.read(waiting)
             except (SerialException, OSError) as exc:
-                print(f"[SER] read error: {exc}")
+                _log(f"read error: {exc}")
                 self.close()
                 time.sleep(0.2)
                 continue
@@ -216,7 +390,7 @@ class SerialConn:
                 line = raw_line.strip().decode("utf-8", errors="ignore")
                 if not line:
                     continue
-                print(f"[ESP→SER] {line}")
+                _log(f"ESP→SER {line}")
                 try:
                     obj = json.loads(line)
                 except json.JSONDecodeError:
@@ -232,7 +406,7 @@ class SerialConn:
                     try:
                         callback(obj)
                     except Exception as exc:
-                        print(f"[SER] on_json callback error: {exc}")
+                        _log(f"on_json callback error: {exc}")
 
     # ------------------------------- vigilancia -------------------------------
     def _alive_touch(self) -> bool:
@@ -269,6 +443,9 @@ class CommWatcher(threading.Thread):
         self._last_connected = self.serial.is_connected()
         self._last_port = self.serial.port_name
         self._last_door_poll = 0.0
+        self._disconnect_since: Optional[float] = None
+        self._next_attempt = 0.0
+        self._retry_delay = 0.5
 
     # ------------------------------ utilidades --------------------------------
     def _emit(self, callback: Optional[Callable], *args) -> None:
@@ -302,11 +479,15 @@ class CommWatcher(threading.Thread):
         else:
             target = None
         for port in ports:
-            if self.serial.connect(port):
+            _log(f"Intentando reconectar en {port}")
+            if self.serial.connect_with_handshake(port):
+                _log(f"Reconexión OK en {port}")
                 return True
         if not target:
             for port in self.serial.list_ports():
-                if self.serial.connect(port):
+                _log(f"Intentando reconectar (escaneo) en {port}")
+                if self.serial.connect_with_handshake(port):
+                    _log(f"Reconexión OK en {port}")
                     return True
         return False
 
@@ -318,6 +499,7 @@ class CommWatcher(threading.Thread):
         while not self._stop.is_set():
             try:
                 connected = self.serial.is_connected()
+                connecting = getattr(self.serial, "is_connecting", lambda: False)()
                 current_port = self.serial.port_name
                 available_ports = list(self.serial.list_ports())
                 port_present = current_port in available_ports if current_port else False
@@ -329,6 +511,9 @@ class CommWatcher(threading.Thread):
                     current_port = None
 
                 if connected:
+                    self._disconnect_since = None
+                    self._retry_delay = 0.5
+                    self._next_attempt = 0.0
                     if not self._last_connected:
                         self._last_connected = True
                         self._last_port = current_port
@@ -347,13 +532,30 @@ class CommWatcher(threading.Thread):
                         self._last_port = None
                         self._emit(self._on_disconnect)
                         self._last_door_poll = 0.0
+                    now = time.time()
+                    if self._disconnect_since is None:
+                        self._disconnect_since = now
+                        self._retry_delay = 0.5
+                        self._next_attempt = 0.0
 
-                    if self._attempt_reconnect(available_ports):
-                        self._last_connected = True
-                        self._last_port = self.serial.port_name
-                        self._last_door_poll = 0.0
-                        if self._last_port:
-                            self._emit(self._on_connect, self._last_port)
+                    if not connecting and now >= self._next_attempt:
+                        if self._attempt_reconnect(available_ports):
+                            self._last_connected = True
+                            self._last_port = self.serial.port_name
+                            self._last_door_poll = 0.0
+                            self._disconnect_since = None
+                            self._retry_delay = 0.5
+                            self._next_attempt = 0.0
+                            if self._last_port:
+                                self._emit(self._on_connect, self._last_port)
+                        else:
+                            # Backoff progresivo tras 60 s desconectado
+                            elapsed = now - self._disconnect_since if self._disconnect_since else 0
+                            if elapsed > 120:
+                                self._retry_delay = max(self._retry_delay, 5.0)
+                            elif elapsed > 60:
+                                self._retry_delay = max(self._retry_delay, 2.0)
+                            self._next_attempt = now + self._retry_delay
             except Exception:
                 if self.serial.is_connected():
                     self.serial.close()
