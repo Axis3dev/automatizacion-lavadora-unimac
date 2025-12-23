@@ -36,7 +36,6 @@ class WasherUI(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Lavadora Industrial")
-        self.attributes("-fullscreen", True)
 
         self.update_idletasks()
         screen_h = self.winfo_screenheight()
@@ -70,6 +69,20 @@ class WasherUI(tk.Tk):
         self.serial.start()
 
         self.CFG = CFG
+        self._apply_kiosk_mode(bool(self.CFG.get("kiosk_mode", True)))
+
+        last_state = self._load_last_state()
+        last_lock = last_state.get("lock_engaged")
+        self.door_locked = bool(last_lock) if isinstance(last_lock, bool) else False
+        self._esp_cycle_running = bool(last_state.get("cycle_running")) if isinstance(last_state.get("cycle_running"), bool) else False
+        self._startup_synced = False
+        if last_state:
+            print(
+                "[UI] startup sync result: "
+                f"door_closed={last_state.get('door_closed')}, "
+                f"lock_engaged={last_state.get('lock_engaged')}, "
+                f"cycle_running={last_state.get('cycle_running')}"
+            )
 
         # HW / Controller / Executor
         self.hw = HardwareIO(
@@ -125,8 +138,7 @@ class WasherUI(tk.Tk):
         # Estado puerta / control ejecución
         self.door_state: Optional[bool] = None
         self.door_var = tk.StringVar(value="Puerta: —")
-        self.door_locked: bool = True
-        self.door_btn_text = tk.StringVar(value="Desbloquear puerta")
+        self.door_btn_text = tk.StringVar(value="Desbloquear puerta" if self.door_locked else "Bloquear puerta")
         self.run_btn_text = tk.StringVar(value="▶  Ejecutar")
         self._run_btn_default_text = self.run_btn_text.get()
         self._run_btn_normal_foreground = ""
@@ -143,7 +155,7 @@ class WasherUI(tk.Tk):
         self._latched_total_steps: int = 0
 
         self._build_ui()
-        self._apply_door_state(None)
+        self._apply_door_state(last_state.get("door_closed") if isinstance(last_state.get("door_closed"), bool) else None)
         self._load_cycle_list()
         self.after(0, self._cache_run_button_size)
         self._sync_run_button_state()
@@ -153,6 +165,46 @@ class WasherUI(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     # ---------- utils ----------
+    def _apply_kiosk_mode(self, enabled: bool) -> None:
+        if enabled:
+            try:
+                self.attributes("-fullscreen", True)
+                self.attributes("-topmost", True)
+                self.overrideredirect(True)
+            except Exception:
+                pass
+            self.bind("<Escape>", self._block_exit)
+            self.bind("<Alt-F4>", self._block_exit)
+        else:
+            try:
+                self.attributes("-fullscreen", False)
+                self.attributes("-topmost", False)
+                self.overrideredirect(False)
+            except Exception:
+                pass
+
+    def _block_exit(self, _event=None):
+        return "break"
+
+    def _load_last_state(self) -> Dict:
+        last_state = self.CFG.get("last_state", {}) if isinstance(self.CFG, dict) else {}
+        return last_state if isinstance(last_state, dict) else {}
+
+    def _update_last_state(self, **updates) -> None:
+        if not isinstance(self.CFG, dict):
+            return
+        last_state = self._load_last_state()
+        changed = False
+        for key, value in updates.items():
+            if value is None:
+                continue
+            if isinstance(value, bool) and last_state.get(key) != value:
+                last_state[key] = value
+                changed = True
+        if changed:
+            self.CFG["last_state"] = last_state
+            save_config(self.CFG)
+
     def _bump_fonts(self, delta=2):
         for name in ("TkDefaultFont","TkTextFont","TkHeadingFont","TkMenuFont",
                      "TkTooltipFont","TkCaptionFont","TkSmallCaptionFont","TkFixedFont","TkIconFont"):
@@ -303,14 +355,34 @@ class WasherUI(tk.Tk):
         if not isinstance(data, dict):
             return
         event = data.get("event")
-        if event == "door":
+        if event == "status":
+            door_closed = data.get("door_closed")
+            lock_engaged = data.get("lock_engaged")
+            cycle_running = data.get("cycle_running")
+            if isinstance(lock_engaged, bool):
+                self.door_locked = lock_engaged
+            if isinstance(cycle_running, bool):
+                self._esp_cycle_running = cycle_running
+            self._apply_door_state(door_closed if isinstance(door_closed, bool) else None)
+            self._sync_door_button_state()
+            self._update_last_state(
+                door_closed=door_closed if isinstance(door_closed, bool) else None,
+                lock_engaged=lock_engaged if isinstance(lock_engaged, bool) else None,
+                cycle_running=cycle_running if isinstance(cycle_running, bool) else None,
+            )
+            if not self._startup_synced:
+                print(f"[UI] startup sync result: door_closed={door_closed}, lock_engaged={lock_engaged}, cycle_running={cycle_running}")
+                self._startup_synced = True
+        elif event == "door":
             closed_val = data.get("closed")
             closed_state = None if closed_val is None else bool(closed_val)
             self._apply_door_state(closed_state)
+            self._update_last_state(door_closed=closed_state if isinstance(closed_state, bool) else None)
         elif data.get("ack") == "door":
             if "lock" in data:
                 self.door_locked = bool(data.get("lock"))
             self._sync_door_button_state()
+            self._update_last_state(lock_engaged=self.door_locked)
         elif event == "blocked":
             if data.get("reason") == "door_open":
                 self.toast("Operación bloqueada: puerta abierta.")
@@ -460,12 +532,21 @@ class WasherUI(tk.Tk):
         except Exception:
             pass
 
-        if state is False and self.executor.state in (Executor.RUNNING, Executor.PAUSED, Executor.HOLD):
-            self._stop_execution(reason="Paro por puerta abierta")
+        if state is False and self.executor.state == Executor.RUNNING:
+            print("[UI] door-open during cycle: PAUSE_NO_UNLOCK")
+            self.executor.pause()
             try:
-                self.toast("⚠ Puerta abierta: ciclo detenido.")
+                self.btn_pause.config(text="▶  Reanudar")
             except Exception:
-                messagebox.showwarning("Puerta abierta", "Ciclo detenido por seguridad.")
+                pass
+            try:
+                self.status.config(text="Estado actual: Pausado por puerta abierta")
+            except Exception:
+                pass
+            try:
+                self.toast("⚠ Puerta abierta: ciclo pausado.")
+            except Exception:
+                messagebox.showwarning("Puerta abierta", "Ciclo pausado por seguridad.")
 
         self._sync_run_button_state()
         self._sync_door_button_state()
@@ -716,6 +797,7 @@ class WasherUI(tk.Tk):
             if hasattr(self.executor, "on_serial_reconnected"):
                 self.executor.on_serial_reconnected()
             if self.serial.is_connected():
+                self.serial.request_status()
                 self.serial.send_json({"cmd": "door?"})
         self.after(0, _cb)
 

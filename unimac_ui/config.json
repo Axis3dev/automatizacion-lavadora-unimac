@@ -31,5 +31,6 @@
     "motor_pause_seconds": 0
   },
   "serial_port": "/dev/ttyUSB0",
-  "baudrate": 115200
+  "baudrate": 115200,
+  "kiosk_mode": true
 }

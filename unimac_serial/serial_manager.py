@@ -123,6 +123,9 @@ class SerialManager:
         return bool(ser and ser.is_open)
 
     # Métodos auxiliares para UI/otros módulos
+    def request_status(self) -> bool:
+        return self.send_line("STATUS\n")
+
     def send_line(self, line: Union[str, bytes]) -> bool:
         data = line if isinstance(line, bytes) else line.encode("utf-8")
         if isinstance(line, str) and not line.endswith("\n"):
@@ -255,6 +258,7 @@ class SerialManager:
     def _handshake(self, ser: Serial) -> bool:
         deadline = time.time() + 1.5
         try:
+            ser.write(b"STATUS\n")
             ser.write(b'{"cmd":"door?"}\n')
             ser.flush()
         except Exception:
@@ -281,6 +285,10 @@ class SerialManager:
                         if isinstance(obj, dict):
                             if obj.get("boot") == "ok":
                                 found = True
+                                break
+                            if obj.get("event") == "status":
+                                found = True
+                                self._dispatch_json(obj)
                                 break
                             if obj.get("event") == "door" and "closed" in obj:
                                 found = True
