@@ -36,10 +36,6 @@ class WasherUI(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Lavadora Industrial")
-        self.attributes("-fullscreen", True)
-        self.overrideredirect(True)
-        self.resizable(False, False)
-        self.bind("<Control-Alt-q>", lambda _event=None: self._on_close())
 
         self.update_idletasks()
         screen_h = self.winfo_screenheight()
