@@ -69,7 +69,6 @@ class WasherUI(tk.Tk):
         self.serial.start()
 
         self.CFG = CFG
-        self._apply_kiosk_mode(bool(self.CFG.get("kiosk_mode", True)))
 
         last_state = self._load_last_state()
         last_lock = last_state.get("lock_engaged")
@@ -165,27 +164,6 @@ class WasherUI(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     # ---------- utils ----------
-    def _apply_kiosk_mode(self, enabled: bool) -> None:
-        if enabled:
-            try:
-                self.attributes("-fullscreen", True)
-                self.attributes("-topmost", True)
-                self.overrideredirect(True)
-            except Exception:
-                pass
-            self.bind("<Escape>", self._block_exit)
-            self.bind("<Alt-F4>", self._block_exit)
-        else:
-            try:
-                self.attributes("-fullscreen", False)
-                self.attributes("-topmost", False)
-                self.overrideredirect(False)
-            except Exception:
-                pass
-
-    def _block_exit(self, _event=None):
-        return "break"
-
     def _load_last_state(self) -> Dict:
         last_state = self.CFG.get("last_state", {}) if isinstance(self.CFG, dict) else {}
         return last_state if isinstance(last_state, dict) else {}
