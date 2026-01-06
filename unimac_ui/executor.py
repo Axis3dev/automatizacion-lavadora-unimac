@@ -248,7 +248,6 @@ class Executor:
         self._tick_fraction = 0.0
 
         self._emit_start_event()
-        self._send({"cmd": "door", "lock": True})
         self._send({"cmd": "buzzer", "on": True, "t_ms": 120})
         self._apply_step(self.cycle.pasos[self.step_index])
         self.cb.on_status("Ejecutando")
@@ -667,4 +666,3 @@ class Executor:
         self._set_motor(False)
         self._motor_speed = self._step_target_speed or self._motor_speed
         self._start_motor()
-
